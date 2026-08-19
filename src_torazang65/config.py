@@ -30,7 +30,28 @@ CHANNELS = ("193", "211")
 RMSE_EPSILON = 1e-8
 BATCH_SIZE = 256
 EPOCHS = 100
-NUM_WORKERS = 2
+NUM_WORKERS = 4
+
+ ==========================================
+# 3.5 Model architecture
+# ==========================================
+# train.py와 inference.py가 같은 구조를 쓰도록 여기서 한 번만 정의한다.
+# 값이 어긋나면 체크포인트 load_state_dict가 실패한다.
+#
+# 유효표본이 수백 개 수준(9,607 샘플이지만 6시간 stride로 19배 중복)이라
+# 이전 설정(d_model=256, enc3/dec2, 3.74M)은 과적합했다. e21에 val 65.951로
+# 바닥을 치고 상승 전환.
+MODEL_KWARGS = dict(
+    d_model=128,
+    wind_dim=32,
+    nhead=8,
+    num_encoder_layers=2,
+    num_decoder_layers=1,
+    dim_feedforward=256,
+    dropout=0.1,
+)
+
+# ==========================================
 
 # ==========================================
 # 4. Device Setup

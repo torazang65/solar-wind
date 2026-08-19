@@ -24,8 +24,9 @@ if WIND_ONLY:
 
 # 모델 및 옵티마이저 초기화
 model = SolarWindBaseline(
-    image_size=IMAGE_SIZE, use_images=not WIND_ONLY
+    image_size=IMAGE_SIZE, use_images=not WIND_ONLY, **MODEL_KWARGS
 ).to(DEVICE)
+print(f"파라미터 수: {sum(p.numel() for p in model.parameters())/1e6:.2f}M", flush=True)
 optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0.01)
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
     optimizer, mode="min", factor=0.25, patience=5, min_lr=1e-6
