@@ -11,7 +11,7 @@ from dataset import (
 )
 
 def load_best_model():
-    model = SolarWindBaseline(image_size=IMAGE_SIZE).to(DEVICE)
+    model = SolarWindBaseline(image_size=IMAGE_SIZE, **MODEL_KWARGS).to(DEVICE)
     checkpoint_path = OUTPUT_DIR / "best_model.pth"
     checkpoint = torch.load(checkpoint_path, map_location=DEVICE, weights_only=True)
     model.load_state_dict(checkpoint["model_state_dict"])
