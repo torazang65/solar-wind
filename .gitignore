@@ -18,3 +18,4 @@ __pycache__/
 .npm/
 .nv/
 .bashrc
+.DS_Store
