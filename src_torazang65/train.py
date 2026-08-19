@@ -1,3 +1,4 @@
+import os
 import time
 import math
 import torch
@@ -8,14 +9,29 @@ from config import *
 from model import SolarWindBaseline
 from dataset import train_loader, val_loader
 
+# WIND_ONLY=1 로 실행하면 CNN을 건너뛰고 wind 히스토리만으로 학습한다.
+# 이미지 경로가 일반화에 실제로 기여하는지 확인하는 진단용 실행이며,
+# 결과는 별도 디렉토리에 저장되어 본 실행의 산출물을 덮어쓰지 않는다.
+WIND_ONLY = os.environ.get("WIND_ONLY") == "1"
+RUN_DIR = OUTPUT_DIR / "wind_only" if WIND_ONLY else OUTPUT_DIR
+RUN_DIR.mkdir(parents=True, exist_ok=True)
+
+if WIND_ONLY:
+    print("=" * 60)
+    print("WIND-ONLY 진단 실행: 이미지 입력을 사용하지 않습니다")
+    print(f"출력 경로: {RUN_DIR}")
+    print("=" * 60, flush=True)
+
 # 모델 및 옵티마이저 초기화
-model = SolarWindBaseline(image_size=IMAGE_SIZE).to(DEVICE)
+model = SolarWindBaseline(
+    image_size=IMAGE_SIZE, use_images=not WIND_ONLY
+).to(DEVICE)
 optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0.01)
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
     optimizer, mode="min", factor=0.25, patience=3, min_lr=1e-6
 )
 scaler = torch.amp.GradScaler(DEVICE.type, enabled=USE_AMP)
-checkpoint_path = OUTPUT_DIR / "best_model.pth"
+checkpoint_path = RUN_DIR / "best_model.pth"
 
 if checkpoint_path.exists():
     checkpoint_path.unlink()
@@ -87,9 +103,9 @@ if __name__ == "__main__":
 
     # 시각화 및 저장
     history_frame = pd.DataFrame(history)
-    history_frame.to_csv(OUTPUT_DIR / "history.csv", index=False)
+    history_frame.to_csv(RUN_DIR / "history.csv", index=False)
     history_frame.plot(x="epoch", y=["train_rmse_km_s", "val_rmse_km_s"], grid=True)
     plt.ylabel("RMSE (km/s)")
     plt.tight_layout()
-    plt.savefig(OUTPUT_DIR / "learning_curve.png", dpi=140)
-    print("Training finished.")
+    plt.savefig(RUN_DIR / "learning_curve.png", dpi=140)
+    print(f"Training finished. best_val_rmse={best_val_rmse:.3f}")

@@ -63,6 +63,7 @@ class SolarWindBaseline(nn.Module):
         d_model=256,
         wind_dim=64,
         image_size=64,
+        use_images=True,
         nhead=8,
         num_encoder_layers=3,
         num_decoder_layers=2,
@@ -135,6 +136,12 @@ class SolarWindBaseline(nn.Module):
             )
 
         spatial = image_size // 16
+
+        # Diagnostic switch. With use_images=False the CNN is skipped
+        # entirely and the image slice of every token is zeroed, so the
+        # model sees wind history only. Parameters are still built, so
+        # checkpoints stay compatible between the two modes.
+        self.use_images = use_images
 
         # -> image slice of the fused token
         #
@@ -259,51 +266,23 @@ class SolarWindBaseline(nn.Module):
             nn.Linear(d_model // 2, 1),
         )
 
+        # Zero-init the last layer so the head starts at exactly zero.
+        # Combined with the persistence residual in forward(), the
+        # model starts as pure persistence and learns only the
+        # correction on top of it. Without this the initial prediction
+        # is wind[-1] plus a random offset of roughly +-200 km/s.
+        nn.init.zeros_(self.output_head[-1].weight)
+        nn.init.zeros_(self.output_head[-1].bias)
+
     def forward(self, images, wind):
 
         batch_size = images.size(0)
 
-        # ============================================================
-        # IMAGE TOKENS
-        # ============================================================
-
-        # dataset:
+        # Last observed wind value, kept for the persistence residual
+        # at the very end of forward.
         #
-        # images:
-        # (B, T=20, C=2, H=64, W=64)
-        #
-        # Conv3D wants:
-        #
-        # (B, C=2, T=20, H=64, W=64)
-        image_features = images.permute(
-            0, 2, 1, 3, 4
-        ).contiguous()
-
-        image_features = self.stem(image_features)
-        image_features = self.image_encoder(image_features)
-
-        # expected:
-        #
-        # (B, 128, 20, 4, 4)
-
-        # move time dimension:
-        #
-        # (B, 20, 128, 4, 4)
-        image_features = image_features.permute(
-            0, 2, 1, 3, 4
-        ).contiguous()
-
-        # flatten spatial/channel dimensions
-        #
-        # (B, 20, 2048)
-        image_features = image_features.flatten(2)
-
-        # (B,20,2048)
-        #       ↓
-        # (B,20,d_model - wind_dim)
-        image_tokens = self.image_projection(
-            image_features
-        )
+        # (B,20) -> (B,1)
+        last_wind = wind[:, -1:]
 
         # ============================================================
         # WIND TOKENS
@@ -316,6 +295,58 @@ class SolarWindBaseline(nn.Module):
 
         # (B,20,wind_dim)
         wind_tokens = self.wind_projection(wind)
+
+        # ============================================================
+        # IMAGE TOKENS
+        # ============================================================
+
+        if self.use_images:
+            # dataset:
+            #
+            # images:
+            # (B, T=20, C=2, H=64, W=64)
+            #
+            # Conv3D wants:
+            #
+            # (B, C=2, T=20, H=64, W=64)
+            image_features = images.permute(
+                0, 2, 1, 3, 4
+            ).contiguous()
+
+            image_features = self.stem(image_features)
+            image_features = self.image_encoder(image_features)
+
+            # expected:
+            #
+            # (B, 128, 20, 4, 4)
+
+            # move time dimension:
+            #
+            # (B, 20, 128, 4, 4)
+            image_features = image_features.permute(
+                0, 2, 1, 3, 4
+            ).contiguous()
+
+            # flatten spatial/channel dimensions
+            #
+            # (B, 20, 2048)
+            image_features = image_features.flatten(2)
+
+            # (B,20,2048)
+            #       ↓
+            # (B,20,d_model - wind_dim)
+            image_tokens = self.image_projection(
+                image_features
+            )
+        else:
+            # wind-only diagnostic: skip the CNN and blank the image
+            # slice. dtype follows wind_tokens so this stays correct
+            # under autocast.
+            image_tokens = wind_tokens.new_zeros(
+                batch_size,
+                wind_tokens.size(1),
+                self.image_projection.out_features,
+            )
 
         # ============================================================
         # MULTIMODAL SEQUENCE
@@ -405,4 +436,14 @@ class SolarWindBaseline(nn.Module):
         # (B,12)
         prediction = prediction.squeeze(-1)
 
-        return prediction
+        # ============================================================
+        # PERSISTENCE RESIDUAL
+        # ============================================================
+        # The head predicts the *change* from the last observed wind
+        # value rather than the absolute level. wind and target share
+        # the same /1000 scaling in dataset.py, so the units match.
+        #
+        # (B,12) + (B,1) -> (B,12)
+        # ============================================================
+
+        return prediction + last_wind
