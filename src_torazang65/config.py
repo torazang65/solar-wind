@@ -18,7 +18,7 @@ if torch.cuda.is_available():
 # 2. Paths & Directories
 # ==========================================
 DATA_ROOT = Path("public_dataset/competition_dataset_6h")
-OUTPUT_DIR = Path("outputs/baseline_6h")
+OUTPUT_DIR = Path("outputs/transformer_v1_64px_residual_torazang65")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 CACHE_DIR = Path("outputs/cache")
 
@@ -29,8 +29,8 @@ IMAGE_SIZE = 64
 CHANNELS = ("193", "211")
 RMSE_EPSILON = 1e-8
 BATCH_SIZE = 256
-EPOCHS = 20
-NUM_WORKERS = 4
+EPOCHS = 100
+NUM_WORKERS = 2
 
 # ==========================================
 # 4. Device Setup
