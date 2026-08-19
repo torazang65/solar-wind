@@ -29,7 +29,11 @@ test_index = np.arange(len(test_inputs), dtype=np.int64)
 
 def prepare_image_memmap(split, inputs):
     image_root = DATA_ROOT / split
-    cache_root = DATA_ROOT / "resized_cache" / f"{IMAGE_SIZE}px"
+    # Cache lives outside DATA_ROOT so it survives read-only dataset mounts
+    # and is shared across experiments. Channels are part of the path because
+    # the validity check would otherwise rebuild over the same file whenever
+    # CHANNELS differs between runs.
+    cache_root = CACHE_DIR / f"{IMAGE_SIZE}px_{'-'.join(CHANNELS)}"
     cache_root.mkdir(parents=True, exist_ok=True)
     array_path = cache_root / f"{split}_images.npy"
     metadata_path = cache_root / f"{split}_metadata.json"

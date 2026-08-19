@@ -20,6 +20,7 @@ if torch.cuda.is_available():
 DATA_ROOT = Path("public_dataset/competition_dataset_6h")
 OUTPUT_DIR = Path("outputs/baseline_6h")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+CACHE_DIR = Path("outputs/cache")
 
 # ==========================================
 # 3. Hyperparameters
