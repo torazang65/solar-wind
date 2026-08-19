@@ -61,11 +61,13 @@ class SolarWindBaseline(nn.Module):
     def __init__(
         self,
         d_model=256,
+        wind_dim=64,
         nhead=8,
         num_encoder_layers=3,
         num_decoder_layers=2,
         dim_feedforward=512,
         dropout=0.1,
+        pos_embedding_std=0.5,
     ):
         super().__init__()
 
@@ -126,47 +128,51 @@ class SolarWindBaseline(nn.Module):
         #
         # (B, 20, 128 * 4 * 4)
         #
-        # -> Transformer dimension d_model
-        self.image_projection = nn.Sequential(
-            nn.Linear(128 * 4 * 4, d_model),
-            nn.LayerNorm(d_model),
+        # -> image slice of the fused token
+        #
+        # No LayerNorm here: normalization happens once on the fused
+        # token, after the positional embedding has been added.
+        self.image_projection = nn.Linear(
+            128 * 4 * 4,
+            d_model - wind_dim,
         )
 
         # ============================================================
         # 2. Wind embedding
         # ============================================================
-        #   each wind value -> one token
+        #   each wind value gets its own slice of the fused token,
+        #   so the scalar keeps a dedicated subspace instead of
+        #   competing with the image features for all d_model dims.
         #
         # (B, 20)
         #       ↓
         # (B, 20, 1)
         #       ↓
-        # (B, 20, d_model)
+        # (B, 20, wind_dim)
         # ============================================================
 
-        self.wind_projection = nn.Sequential(
-            nn.Linear(1, d_model),
-            nn.LayerNorm(d_model),
-        )
+        self.wind_projection = nn.Linear(1, wind_dim)
 
         # ============================================================
-        # 3. Temporal / modality embeddings
+        # 3. Positional embedding + fused-token normalization
+        # ============================================================
+        #
+        # Image and wind are concatenated per timestep, so there is a
+        # single token type and no modality embedding is needed.
+        #
+        # std=0.5 is deliberate. The LayerNorm below forces the token
+        # to per-dim std 1.0, so an embedding initialized at the usual
+        # 0.02 would contribute ~2% of the token and be normalized
+        # away -- the encoder would be nearly order-blind at init.
+        # Pushing it to 1.0 instead starts diluting the token content,
+        # so 0.5 is the balance point.
         # ============================================================
 
-        # 20 timestamps:
-        # -114h ... 0h etc.
-        self.time_embedding = nn.Parameter(
-            torch.randn(1, 20, d_model) * 0.02
+        self.pos_embedding = nn.Parameter(
+            torch.randn(1, 20, d_model) * pos_embedding_std
         )
 
-        # distinguish image token from wind token
-        self.image_modality_embedding = nn.Parameter(
-            torch.randn(1, 1, d_model) * 0.02
-        )
-
-        self.wind_modality_embedding = nn.Parameter(
-            torch.randn(1, 1, d_model) * 0.02
-        )
+        self.token_norm = nn.LayerNorm(d_model)
 
         # ============================================================
         # 4. Multimodal Transformer Encoder
@@ -198,6 +204,11 @@ class SolarWindBaseline(nn.Module):
         # query 11 -> +72h
         #
         # These are learned parameters.
+        #
+        # 0.02 is fine here, unlike the positional embedding above:
+        # these are not added to anything, and the decoder is
+        # norm_first, so LayerNorm -- which is scale invariant --
+        # is the first thing applied to them.
         # ============================================================
 
         self.future_queries = nn.Parameter(
@@ -281,16 +292,9 @@ class SolarWindBaseline(nn.Module):
 
         # (B,20,2048)
         #       ↓
-        # (B,20,d_model)
+        # (B,20,d_model - wind_dim)
         image_tokens = self.image_projection(
             image_features
-        )
-
-        # Add timestamp + image modality information
-        image_tokens = (
-            image_tokens
-            + self.time_embedding
-            + self.image_modality_embedding
         )
 
         # ============================================================
@@ -302,49 +306,43 @@ class SolarWindBaseline(nn.Module):
         # (B,20,1)
         wind = wind.unsqueeze(-1)
 
-        # (B,20,d_model)
+        # (B,20,wind_dim)
         wind_tokens = self.wind_projection(wind)
-
-        wind_tokens = (
-            wind_tokens
-            + self.time_embedding
-            + self.wind_modality_embedding
-        )
 
         # ============================================================
         # MULTIMODAL SEQUENCE
         # ============================================================
         #
-        # We interleave:
+        # Image and wind observed at the same timestamp are fused into
+        # a single token, so the encoder never has to learn to pair
+        # them up:
         #
         # [
-        #   image_t0,
-        #   wind_t0,
-        #   image_t1,
-        #   wind_t1,
+        #   [image_t0 | wind_t0],
+        #   [image_t1 | wind_t1],
         #   ...
         # ]
         #
         # shape:
         #
-        # (B, 40, d_model)
+        # (B, 20, d_model)
         # ============================================================
 
-        multimodal_tokens = torch.stack(
+        multimodal_tokens = torch.cat(
             [image_tokens, wind_tokens],
-            dim=2,
+            dim=-1,
         )
 
-        multimodal_tokens = multimodal_tokens.flatten(
-            1, 2
+        multimodal_tokens = self.token_norm(
+            multimodal_tokens + self.pos_embedding
         )
 
         # ============================================================
         # ENCODER
         # ============================================================
-        # Every image/wind token can attend to every other past token.
+        # Every timestep can attend to every other observed timestep.
         # memory:
-        # (B,40,d_model)
+        # (B,20,d_model)
         # ============================================================
 
         memory = self.transformer_encoder(

@@ -10,9 +10,9 @@ from dataset import train_loader, val_loader
 
 # 모델 및 옵티마이저 초기화
 model = SolarWindBaseline().to(DEVICE)
-optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0.01)
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-    optimizer, mode="min", factor=0.25, patience=1, min_lr=1e-6
+    optimizer, mode="min", factor=0.25, patience=3, min_lr=1e-6
 )
 scaler = torch.amp.GradScaler(DEVICE.type, enabled=USE_AMP)
 checkpoint_path = OUTPUT_DIR / "best_model.pth"
