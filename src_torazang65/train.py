@@ -28,7 +28,7 @@ model = SolarWindBaseline(
 ).to(DEVICE)
 optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0.01)
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-    optimizer, mode="min", factor=0.25, patience=3, min_lr=1e-6
+    optimizer, mode="min", factor=0.25, patience=5, min_lr=1e-6
 )
 scaler = torch.amp.GradScaler(DEVICE.type, enabled=USE_AMP)
 checkpoint_path = RUN_DIR / "best_model.pth"
@@ -36,7 +36,7 @@ checkpoint_path = RUN_DIR / "best_model.pth"
 if checkpoint_path.exists():
     checkpoint_path.unlink()
 
-patience = 5
+patience = 12
 best_val_rmse = float("inf")
 epochs_without_improvement = 0
 history = []
