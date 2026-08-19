@@ -62,6 +62,7 @@ class SolarWindBaseline(nn.Module):
         self,
         d_model=256,
         wind_dim=64,
+        image_size=64,
         nhead=8,
         num_encoder_layers=3,
         num_decoder_layers=2,
@@ -120,20 +121,27 @@ class SolarWindBaseline(nn.Module):
 
         self.image_encoder = nn.Sequential(*blocks)
 
-        # Existing CNN output:
+        # The stem pool and the 3 block pools each halve the spatial
+        # dims, so the CNN output is image_size // 16 on a side:
         #
-        # (B, 128, 20, 4, 4)
+        #    64px -> (B, 128, 20, 4, 4) -> 2048 per timestep
+        #   128px -> (B, 128, 20, 8, 8) -> 8192 per timestep
         #
-        # -> timestep-wise:
-        #
-        # (B, 20, 128 * 4 * 4)
-        #
+        # Derived rather than hard-coded so changing IMAGE_SIZE in
+        # config.py does not silently break the projection.
+        if image_size % 16 != 0:
+            raise ValueError(
+                f"image_size must be divisible by 16, got {image_size}"
+            )
+
+        spatial = image_size // 16
+
         # -> image slice of the fused token
         #
         # No LayerNorm here: normalization happens once on the fused
         # token, after the positional embedding has been added.
         self.image_projection = nn.Linear(
-            128 * 4 * 4,
+            128 * spatial * spatial,
             d_model - wind_dim,
         )
 
