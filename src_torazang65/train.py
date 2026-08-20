@@ -27,17 +27,29 @@ model = SolarWindBaseline(
     image_size=IMAGE_SIZE, use_images=not WIND_ONLY, **MODEL_KWARGS
 ).to(DEVICE)
 print(f"파라미터 수: {sum(p.numel() for p in model.parameters())/1e6:.2f}M", flush=True)
-optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0.01)
-scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-    optimizer, mode="min", factor=0.25, patience=5, min_lr=1e-6
-)
+optimizer = torch.optim.AdamW(model.parameters(), lr=PEAK_LR, weight_decay=0.01)
+
+# warmup 후 cosine, epoch 단위 step. LambdaLR 인자는 지금까지 step된
+# 횟수(0-index)라 첫 에폭은 PEAK_LR * 1/WARMUP_EPOCHS에서 시작하고,
+# EPOCHS 도달 시점에 MIN_LR 근처까지 내려간다.
+def lr_lambda(step):
+    if step < WARMUP_EPOCHS:
+        return (step + 1) / WARMUP_EPOCHS
+    progress = (step - WARMUP_EPOCHS) / max(1, EPOCHS - WARMUP_EPOCHS)
+    floor = MIN_LR / PEAK_LR
+    return floor + (1.0 - floor) * 0.5 * (1.0 + math.cos(math.pi * progress))
+
+scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 scaler = torch.amp.GradScaler(DEVICE.type, enabled=USE_AMP)
 checkpoint_path = RUN_DIR / "best_model.pth"
 
 if checkpoint_path.exists():
     checkpoint_path.unlink()
 
-patience = 12
+# cosine은 개선이 후반 tail에서 잘게 오는데 val이 이벤트 주도로 ±10씩
+# 널뛰므로, 12로는 스케줄이 끝나기 전에 끊길 위험이 있어 여유를 둔다.
+# 에폭당 ~17초라 늘려도 비용은 미미하다.
+patience = 20
 best_val_rmse = float("inf")
 epochs_without_improvement = 0
 history = []
@@ -77,8 +89,9 @@ if __name__ == "__main__":
         with torch.no_grad():
             val_rmse = run_epoch(val_loader, training=False)
             
-        scheduler.step(val_rmse)
+        # 이번 에폭이 실제로 쓴 lr을 기록한 뒤 다음 에폭 값으로 step.
         learning_rate = optimizer.param_groups[0]["lr"]
+        scheduler.step()
         elapsed = time.perf_counter() - started
         
         history.append({

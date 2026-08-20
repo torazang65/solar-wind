@@ -18,7 +18,9 @@ if torch.cuda.is_available():
 # 2. Paths & Directories
 # ==========================================
 DATA_ROOT = Path("public_dataset/competition_dataset_6h")
-OUTPUT_DIR = Path("outputs/transformer_v2_2x4pool_dynprior_torazang65")
+# train.py가 시작 시 기존 best_model.pth를 지우므로, 런이 바뀔 때마다
+# 이름을 올려 이전 산출물을 보존한다.
+OUTPUT_DIR = Path("outputs/transformer_v3_cosine_torazang65")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 CACHE_DIR = Path("outputs/cache")
 
@@ -31,6 +33,17 @@ RMSE_EPSILON = 1e-8
 BATCH_SIZE = 256
 EPOCHS = 100
 NUM_WORKERS = 4
+
+# ---- 학습률 스케줄 ----
+# v2 런의 병목: lr=1e-4에서 val 바닥이 epoch 4에 왔고, 이후 train은
+# 계속 내려가는데 val은 다시 69.8 밑으로 못 왔다. ReduceLROnPlateau의
+# 첫 감축(epoch 10)은 이미 과적합 구간이라 늦었다. peak를 낮추고
+# cosine으로 1에폭부터 계속 식혀서 바닥을 늦고 깊게 만드는 것이 목표.
+# zero-init prior가 학습될 시간을 버는 효과도 겸한다. PEAK_LR가 주된
+# 스윕 대상.
+PEAK_LR = 3e-5
+MIN_LR = 1e-6
+WARMUP_EPOCHS = 3
 
 # ==========================================
 # 3.5 Model architecture
