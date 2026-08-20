@@ -287,3 +287,48 @@ BATCH_SIZE=128 bash scripts_taeukjung/run_solar_cartesian_v4_local_mps.sh
 
 This experiment should be compared against a 64 px CEA V3 run with the same
 seed and training settings before attributing a difference to the projection.
+
+## Solar physics Transformer v5
+
+V5 keeps the 128 px observer-aligned CEA geometry but replaces the learned CNN
+front end with explicit coronal-hole statistics. For every one of 20 timestamps
+and every cell in a 4 by 8 latitude-longitude grid, it extracts:
+
+- mean 193 A and 211 A intensity;
+- 10th, 25th, and 50th intensity quantiles for both channels;
+- relative-darkness mean and area fractions above 0.15 and 0.30;
+- the mean log 193/211 channel ratio and CEA coordinates;
+- first temporal differences of every feature.
+
+A four-block causal TCN encodes wind, predicts a wind-only correction to the
+fixed linear AR baseline, and supplies wind tokens to the longitude-time
+Transformer. Forecast queries produce a second residual from the fused wind and
+image memory. A small auxiliary wind-only loss keeps the two responsibilities
+separated.
+
+Rows are reconstructed into sliding-window chains from their image filenames.
+The fixed linear baseline and training sampler both use inverse-chain-length
+weights, and validation reports both the competition micro RMSE and a
+chain-macro RMSE. The recovered split contains 28 training chains with lengths
+from 14 to 961 and 11 validation chains of length 109. A chain manifest and
+best-epoch validation predictions are saved with the checkpoint.
+
+Competition server CUDA:
+
+```bash
+git switch taeukjung
+git pull --ff-only origin taeukjung
+bash scripts_taeukjung/run_solar_physics_v5_server_cuda.sh train
+bash scripts_taeukjung/run_solar_physics_v5_server_cuda.sh infer
+```
+
+Local Apple MPS:
+
+```bash
+bash scripts_taeukjung/run_solar_physics_v5_local_mps.sh train
+bash scripts_taeukjung/run_solar_physics_v5_local_mps.sh infer
+```
+
+Both launchers default to 128 px, linear normalization, CEA radius `0.42`, a
+4 by 8 grid, learning rate `1e-4`, dropout 0.25, and chain-balanced sampling.
+The server uses batch size 64 and the local launcher uses batch size 4.

@@ -155,3 +155,42 @@ The local run uses 64 px, batch size 128, linear normalization, 12 maximum
 epochs, seed 777, and the same 199,033-parameter temporal and forecast model.
 Its output is isolated under `dev/outputs/solar_cartesian_v4_local_64`. This is
 a geometry ablation, not a replacement for the 128 px CUDA V3 run.
+
+The run reached its best validation RMSE of `70.385` at epoch 4. It remained
+worse than the 128 px CEA runs and provides no evidence for removing CEA.
+
+## V5 causal wind and explicit coronal-hole features
+
+V5 addresses the V3 generalization gap without increasing capacity. It has
+179,725 parameters and separates the forecast into three additive terms:
+
+1. a fixed horizon-wise linear AR baseline from the latest wind;
+2. a learned causal-TCN wind residual;
+3. a Transformer residual from wind tokens and explicit CEA coronal-hole cells.
+
+The fixed image feature vector contains intensity means and quantiles, relative
+darkness means and area fractions, the 193/211 log ratio, CEA coordinates, and
+their first temporal differences. This avoids asking a CNN to rediscover the
+same low-intensity region measurements from only 28 independent training
+chains.
+
+The chain audit recovered 28 training chains totaling 9,607 rows. Their lengths
+range from 14 to 961, so ordinary row shuffling gives the longest chain about 69
+times as much influence as the shortest. V5 uses inverse-length weighted
+linear-baseline fitting and sampling, and records chain-macro validation RMSE
+alongside the competition micro RMSE. The fixed validation split contains 11
+equal chains of 109 rows.
+
+On the complete validation split, the chain-weighted fixed baseline scores
+`75.903` micro RMSE and `73.879` chain-macro RMSE, versus `76.094` for the
+original row-weighted baseline.
+
+Implementation checks completed locally:
+
+- 128 px MPS forward and backward: finite `(2, 12)` output;
+- explicit feature width: 36 per time and CEA cell;
+- one-epoch real-data smoke training with chain-balanced sampling completed;
+- checkpoint reload, full validation inference, and `(3868, 13)` submission
+  generation completed;
+- the smoke run used only 64 training and 32 validation rows and is therefore a
+  pipeline test, not a performance estimate.
