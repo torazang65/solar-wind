@@ -18,7 +18,7 @@ if torch.cuda.is_available():
 # 2. Paths & Directories
 # ==========================================
 DATA_ROOT = Path("public_dataset/competition_dataset_6h")
-OUTPUT_DIR = Path("outputs/transformer_v1_64px_residual_torazang65")
+OUTPUT_DIR = Path("outputs/transformer_v2_2x4pool_dynprior_torazang65")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 CACHE_DIR = Path("outputs/cache")
 
@@ -44,6 +44,20 @@ NUM_WORKERS = 4
 # wind_dim은 제거됨: 이미지/wind가 타임스텝별로 한 토큰에 concat되던
 # 구조에서 각자 별도 토큰 스트림(20+20=40 토큰)으로 분리되면서
 # 두 모달리티 모두 full d_model을 쓴다. 기존 체크포인트와는 호환 안 됨.
+#
+# v2 (2x4pool_dynprior): attention/ablation 분석 결과를 반영한 두 가지
+# 구조 변경. 이전 체크포인트와 호환 안 됨 (image_projection 1024-dim,
+# prior 모듈 추가).
+#  1) GAP -> 2x4 (lat x lon) pooling: 이미지 기여의 실체가 "도래
+#     스트림 감지"인데 GAP가 코로나홀의 중앙/가장자리 위치를 지우고
+#     있었다 (fast&quiet에서 이미지 gain이 유의미한 음수 = false
+#     positive 정황). 대칭 2x2는 center cell이 없어 central meridian
+#     거리 표현이 약하므로, longitude 4열을 그대로 보존하고 latitude만
+#     반으로 접는 비등방 풀링을 쓴다.
+#  2) dynamic temporal prior: 디코더 cross-attention의 시점 선택이
+#     샘플 불변 고정 템플릿이었다 (slow-fast COM gap -2h vs 이론 +34h).
+#     이미지에서 읽은 solar-state로 통과시간 tau를 예측해 attention
+#     logit에 가우시안 bias를 더한다. gate=0이면 v1으로 퇴화.
 MODEL_KWARGS = dict(
     d_model=128,
     nhead=8,
