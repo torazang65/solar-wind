@@ -1,6 +1,7 @@
 import os
 import time
 import math
+import numpy as np
 import torch
 from torch.nn import functional as F
 import pandas as pd
@@ -77,6 +78,9 @@ def lr_lambda(step):
 
 scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 scaler = torch.amp.GradScaler(DEVICE.type, enabled=USE_AMP)
+
+# v5b surge BCE의 클래스 불균형 보정 (val 기준 surge:quiet ~ 363:836).
+surge_pos_weight = torch.tensor(SURGE_POS_WEIGHT, device=DEVICE)
 checkpoint_path = RUN_DIR / "best_model.pth"
 
 if checkpoint_path.exists():
@@ -98,6 +102,8 @@ def run_epoch(loader, training, hindcast_lambda):
     hindcast_value_count = 0.0
     diag_sums = {}
     diag_batches = 0
+    surge_probs = []
+    surge_labels = []
     for batch in loader:
         images = batch["images"].to(DEVICE, non_blocking=PIN_MEMORY)
         wind = batch["wind"].to(DEVICE, non_blocking=PIN_MEMORY)
@@ -138,6 +144,25 @@ def run_epoch(loader, training, hindcast_lambda):
                     loss = loss + TRANSIT_RESIDUAL_L2 * (
                         aux["transit_residual"] ** 2
                     ).mean()
+
+                # v5b surge BCE: label은 미래 target에서 파생 (max_h W
+                # - last_wind > threshold). 이미지 전용 head라 wind
+                # 지름길이 없고, 출력 확률이 fusion gate로 들어가
+                # "quiet면 닫고 pre-surge면 연다"의 판별 특징이 된다.
+                # modality drop 샘플은 상수 logit이라 제외.
+                if aux["surge_logit"] is not None:
+                    surge_label = (
+                        (target.max(dim=1).values - wind[:, -1])
+                        > SURGE_THRESHOLD_KMS / 1000.0
+                    ).float().unsqueeze(-1)
+                    keep = aux["image_keep"].unsqueeze(-1)
+                    surge_bce = F.binary_cross_entropy_with_logits(
+                        aux["surge_logit"], surge_label,
+                        weight=keep,
+                        pos_weight=surge_pos_weight,
+                        reduction="sum",
+                    ) / keep.sum().clamp(min=1.0)
+                    loss = loss + SURGE_LAMBDA * surge_bce
             if training:
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
@@ -181,6 +206,18 @@ def run_epoch(loader, training, hindcast_lambda):
                 diag_sums[key] = diag_sums.get(key, 0.0) + value
             diag_batches += 1
 
+        # surge AUROC 재료 (val 한정).
+        if (not training) and (aux["surge_logit"] is not None):
+            surge_probs.append(
+                torch.sigmoid(aux["surge_logit"].detach())
+                .squeeze(-1).cpu().numpy()
+            )
+            surge_labels.append(
+                ((target.max(dim=1).values - wind[:, -1])
+                 > SURGE_THRESHOLD_KMS / 1000.0)
+                .cpu().numpy()
+            )
+
     forecast_rmse = math.sqrt(squared_error_sum / value_count)
     hindcast_rmse = (
         math.sqrt(hindcast_squared_error_sum / hindcast_value_count)
@@ -190,6 +227,21 @@ def run_epoch(loader, training, hindcast_lambda):
     diag = {
         key: value / diag_batches for key, value in diag_sums.items()
     }
+
+    # surge AUROC (Mann-Whitney rank). 확률이 연속이라 tie 보정은 생략.
+    if surge_probs:
+        scores = np.concatenate(surge_probs)
+        labels = np.concatenate(surge_labels).astype(bool)
+        n_pos = int(labels.sum())
+        n_neg = len(labels) - n_pos
+        if n_pos > 0 and n_neg > 0:
+            ranks = np.empty(len(scores))
+            ranks[scores.argsort()] = np.arange(1, len(scores) + 1)
+            diag["surge_auroc"] = float(
+                (ranks[labels].sum() - n_pos * (n_pos + 1) / 2)
+                / (n_pos * n_neg)
+            )
+
     return forecast_rmse, hindcast_rmse, diag
 
 if __name__ == "__main__":
@@ -243,6 +295,7 @@ if __name__ == "__main__":
             f" hind={val_hindcast_rmse:.1f} alpha={alpha_mean:.3f} beta={beta_mean:.3f}"
             f" vstd={val_diag.get('src_speed_std_kms', float('nan')):.0f}"
             f" cov={val_diag.get('coverage_hind_mean', float('nan')):.2f}"
+            f" auroc={val_diag.get('surge_auroc', float('nan')):.3f}"
             f" D={dist_eff_h:.1f}"
             f" lr={learning_rate:.2e} seconds={elapsed:.1f}"
         )
