@@ -375,3 +375,22 @@ bash scripts_taeukjung/run_solar_factorized_v7_server_cuda.sh infer
 
 V7 defaults to 128 px and writes to the isolated
 `/home/jovyan/outputs/solar_factorized_v7_taeukjung` directory.
+
+## Ballistic Transformer v8
+
+V8 keeps the V6 CEA CNN but uses a smaller 4 by 4 grid and the simpler V1
+memory topology. Forecast-query attention receives a speed-conditioned prior
+that follows solar rotation and an estimated Sun-to-L1 transit time. Training
+uses north/south flips, ordinary row shuffle, a bounded residual, residual L2,
+and EMA checkpoint weights. See `MODEL_REVIEW_V8_taeukjung.md` for the complete
+audit and literature comparison.
+
+Server training and inference:
+
+```bash
+bash scripts_taeukjung/run_solar_ballistic_v8_server_cuda.sh train
+bash scripts_taeukjung/run_solar_ballistic_v8_server_cuda.sh infer
+```
+
+V8 defaults to 128 px and writes to
+`/home/jovyan/outputs/solar_ballistic_v8_taeukjung`.

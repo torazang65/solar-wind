@@ -70,10 +70,19 @@ def infer_temporal_chains(inputs, image_columns):
 
 
 class ChainAwareSolarWindDataset(Dataset):
-    def __init__(self, *args, temporal_chains, **kwargs):
+    def __init__(
+        self,
+        *args,
+        temporal_chains,
+        north_south_flip_probability=0.0,
+        **kwargs,
+    ):
         from dataset import SolarWindDataset
 
         self.base_dataset = SolarWindDataset(*args, **kwargs)
+        if not 0.0 <= north_south_flip_probability <= 1.0:
+            raise ValueError("north_south_flip_probability must be between 0 and 1")
+        self.north_south_flip_probability = float(north_south_flip_probability)
         self.indexes = self.base_dataset.indexes
         if len(temporal_chains.chain_ids) != len(self.base_dataset.image_indexes):
             raise ValueError("chain metadata and input rows have different lengths")
@@ -85,6 +94,11 @@ class ChainAwareSolarWindDataset(Dataset):
 
     def __getitem__(self, item):
         result = self.base_dataset[item]
+        if (
+            self.north_south_flip_probability > 0.0
+            and torch.rand(()) < self.north_south_flip_probability
+        ):
+            result["images"] = torch.flip(result["images"], dims=(-2,))
         row_index = int(self.indexes[item])
         result["row_index"] = row_index
         result["chain_id"] = int(self.chain_ids[row_index])

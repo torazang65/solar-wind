@@ -1,3 +1,4 @@
+import copy
 import json
 import math
 import os
@@ -62,6 +63,51 @@ def fit_horizon_baseline(inputs, targets, chain_ids=None):
     return slope.astype(np.float32), intercept.astype(np.float32)
 
 
+def fit_baseline_residual_scale(inputs, targets, slope, intercept, chain_ids=None):
+    last_wind = inputs[WIND_COLUMNS[-1]].to_numpy(np.float32) / 1000.0
+    target = np.asarray(targets, dtype=np.float32) / 1000.0
+    prediction = last_wind[:, None] * slope + intercept
+    if chain_ids is None:
+        weights = np.ones(len(last_wind), dtype=np.float32)
+    else:
+        chain_ids = np.asarray(chain_ids, dtype=np.int64)
+        unique_ids, counts = np.unique(chain_ids, return_counts=True)
+        count_by_id = dict(zip(unique_ids.tolist(), counts.tolist()))
+        weights = np.asarray(
+            [1.0 / count_by_id[int(chain_id)] for chain_id in chain_ids],
+            dtype=np.float32,
+        )
+    weights = weights / weights.sum()
+    residual = target - prediction
+    residual_mean = np.sum(weights[:, None] * residual, axis=0)
+    variance = np.sum(
+        weights[:, None] * np.square(residual - residual_mean), axis=0
+    )
+    return np.sqrt(np.maximum(variance, 1e-8)).astype(np.float32)
+
+
+class ExponentialMovingAverage:
+    def __init__(self, model, decay):
+        if not 0.0 < decay < 1.0:
+            raise ValueError("EMA decay must be between 0 and 1")
+        self.model = copy.deepcopy(model).eval()
+        self.model.requires_grad_(False)
+        self.decay = float(decay)
+        self.updates = 0
+
+    @torch.no_grad()
+    def update(self, model):
+        self.updates += 1
+        decay = min(self.decay, (1.0 + self.updates) / (10.0 + self.updates))
+        source_state = model.state_dict()
+        for name, averaged in self.model.state_dict().items():
+            source = source_state[name].detach()
+            if averaged.is_floating_point():
+                averaged.lerp_(source, 1.0 - decay)
+            else:
+                averaged.copy_(source)
+
+
 def limited_indexes(indexes, environment_name):
     limit = int(os.getenv(environment_name, "0"))
     if limit <= 0 or limit >= len(indexes):
@@ -90,6 +136,8 @@ def run_epoch(
     scaler,
     training,
     wind_aux_weight,
+    residual_l2_weight=0.0,
+    ema=None,
     collect_predictions=False,
 ):
     model.train(training)
@@ -122,12 +170,19 @@ def run_epoch(
             wind_error_km_s = (wind_prediction.float() - target.float()) * 1000.0
             loss = torch.mean(error_km_s.square())
             loss = loss + wind_aux_weight * torch.mean(wind_error_km_s.square())
+            if residual_l2_weight > 0.0:
+                fusion_residual_km_s = fusion_residual.float() * 1000.0
+                loss = loss + residual_l2_weight * torch.mean(
+                    fusion_residual_km_s.square()
+                )
             if training:
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 scaler.step(optimizer)
                 scaler.update()
+                if ema is not None:
+                    ema.update(model)
 
         detached_error = error_km_s.detach()
         detached_wind_error = wind_error_km_s.detach()
@@ -207,6 +262,10 @@ def main(
     file_stem="solar_physics_v5",
     feature_schema="cea_ch_quantiles_dark_area_ratio_delta_v1",
     extra_model_kwargs=None,
+    training_image_flip_probability=0.0,
+    residual_l2_weight=0.0,
+    ema_decay=None,
+    use_baseline_residual_scale=False,
 ):
     wind_only = os.getenv("WIND_ONLY", "0").lower() in {"1", "true", "yes"}
     chain_balanced = os.getenv("CHAIN_BALANCED_SAMPLING", "1").lower() not in {
@@ -240,6 +299,7 @@ def main(
         selected_train_index,
         train_targets,
         temporal_chains=train_chains,
+        north_south_flip_probability=training_image_flip_probability,
     )
     val_dataset = ChainAwareSolarWindDataset(
         val_image_array,
@@ -265,8 +325,16 @@ def main(
         json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
     )
 
+    baseline_chain_ids = train_chains.chain_ids if chain_balanced else None
     baseline_slope, baseline_intercept = fit_horizon_baseline(
-        train_inputs, train_targets, train_chains.chain_ids
+        train_inputs, train_targets, baseline_chain_ids
+    )
+    baseline_residual_scale = fit_baseline_residual_scale(
+        train_inputs,
+        train_targets,
+        baseline_slope,
+        baseline_intercept,
+        baseline_chain_ids,
     )
     model_kwargs = {
         "image_size": IMAGE_SIZE,
@@ -280,6 +348,8 @@ def main(
         **architecture_kwargs,
         **(extra_model_kwargs or {}),
     }
+    if use_baseline_residual_scale:
+        model_kwargs["baseline_residual_scale"] = baseline_residual_scale.tolist()
     model = model_class(
         baseline_slope=baseline_slope,
         baseline_intercept=baseline_intercept,
@@ -292,6 +362,7 @@ def main(
         optimizer, mode="min", factor=0.25, patience=3, min_lr=1e-6
     )
     scaler = torch.amp.GradScaler(AMP_DEVICE_TYPE, enabled=USE_AMP)
+    ema = ExponentialMovingAverage(model, ema_decay) if ema_decay is not None else None
     checkpoint_path = OUTPUT_DIR / f"best_{file_stem}.pth"
     history_path = OUTPUT_DIR / f"{file_stem}_history.csv"
     prediction_path = OUTPUT_DIR / f"{file_stem}_validation_predictions.csv"
@@ -315,7 +386,10 @@ def main(
         f"cea_grid={latitude_bins}x{longitude_bins} "
         f"train_chains={train_chains.count} val_chains={val_chains.count} "
         f"chain_balanced={chain_balanced} lr={SOLAR_PROBABILISTIC_LR:.2e} "
-        f"wind_aux_weight={wind_aux_weight:.2f} loss=mse_km_s"
+        f"wind_aux_weight={wind_aux_weight:.2f} "
+        f"north_south_flip={training_image_flip_probability:.2f} "
+        f"residual_l2={residual_l2_weight:.3f} "
+        f"ema_decay={ema_decay} loss=mse_km_s"
     )
     print(
         f"linear_baseline_val_rmse={baseline_micro:.3f} "
@@ -336,16 +410,20 @@ def main(
             scaler,
             training=True,
             wind_aux_weight=wind_aux_weight,
+            residual_l2_weight=residual_l2_weight,
+            ema=ema,
         )
+        validation_model = ema.model if ema is not None else model
         with torch.no_grad():
             val_metrics = run_epoch(
-                model,
+                validation_model,
                 val_loader,
                 val_chains.count,
                 optimizer,
                 scaler,
                 training=False,
                 wind_aux_weight=wind_aux_weight,
+                residual_l2_weight=residual_l2_weight,
                 collect_predictions=True,
             )
 
@@ -388,7 +466,7 @@ def main(
                 {
                     "architecture": architecture_name,
                     "version": version,
-                    "model_state_dict": model.state_dict(),
+                    "model_state_dict": validation_model.state_dict(),
                     "model_kwargs": model_kwargs,
                     "epoch": epoch,
                     "val_rmse_km_s": val_metrics["rmse"],
@@ -403,6 +481,9 @@ def main(
                         "solar_cea_radius_fraction": SOLAR_CEA_RADIUS_FRACTION,
                         "feature_schema": feature_schema,
                         "cea_grid": [latitude_bins, longitude_bins],
+                        "north_south_flip_probability": training_image_flip_probability,
+                        "residual_l2_weight": residual_l2_weight,
+                        "ema_decay": ema_decay,
                     },
                 },
                 checkpoint_path,

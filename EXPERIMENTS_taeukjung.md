@@ -234,3 +234,25 @@ reduced by a factor of 5.7. Real-data smoke training with two DataLoader workers
 strict checkpoint reload, full validation inference, and `(3868, 13)` test
 submission generation all completed. The smoke checkpoint used only 32 training
 rows and is not a performance estimate.
+
+The complete 128 px CUDA run reached its best validation RMSE of `67.328` and
+chain-macro RMSE of `65.953` at epoch 7. V6 remains 0.210 km/s better in micro
+RMSE and 0.283 km/s better in chain-macro RMSE, so factorized attention did not
+replace V6.
+
+## V8 ballistic decoder and regularized sampling
+
+V8 returns to V1's simpler temporal-summary plus raw-spatial memory topology
+while keeping V6's corrected CEA CNN. It uses a 4 by 4 grid, north/south flip
+augmentation, ordinary row shuffling, EMA checkpoint weights, a bounded image
+correction, and a speed-conditioned time/longitude attention prior derived from
+solar rotation and ballistic transit time.
+
+In a controlled local directional test with 64 px images, 1,024 training rows,
+512 model-selection rows, and 10 epochs, full validation inference scored
+`69.197`, versus `69.764` for V6 trained under the corresponding control. V8
+improved 11 of 12 horizons; +72 hours was 0.404 km/s worse. This is a local
+screening result only. The complete 128 px CUDA run must beat the verified V1
+score of `66.889` before V8 is promoted.
+
+The full code and literature audit is in `MODEL_REVIEW_V8_taeukjung.md`.

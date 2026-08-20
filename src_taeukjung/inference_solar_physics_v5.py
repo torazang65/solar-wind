@@ -129,13 +129,26 @@ def main(
     val_loader = make_chain_loader(val_dataset, training=False)
 
     print(f"\n[Running {file_stem} Validation Evaluation]")
-    validation_prediction, _, chain_ids = predict(model, val_loader)
+    validation_prediction, validation_ids, chain_ids = predict(model, val_loader)
     validation_target = np.asarray(val_targets[val_index], dtype=np.float64)
     validation_metrics = metrics_by_horizon(
         validation_target, validation_prediction
     )
     validation_metrics.to_csv(
         OUTPUT_DIR / f"{file_stem}_validation_metrics.csv", index=False
+    )
+    validation_frame = pd.DataFrame(
+        validation_prediction,
+        columns=[f"prediction_{column}" for column in TARGET_COLUMNS],
+    )
+    validation_frame.insert(0, "chain_id", chain_ids)
+    validation_frame.insert(0, "sample_id", validation_ids)
+    actual_frame = pd.DataFrame(
+        validation_target,
+        columns=[f"actual_{column}" for column in TARGET_COLUMNS],
+    )
+    pd.concat([validation_frame, actual_frame], axis=1).to_csv(
+        OUTPUT_DIR / f"{file_stem}_validation_predictions.csv", index=False
     )
     squared_error = (validation_prediction - validation_target) ** 2
     overall_rmse = float(np.sqrt(np.mean(squared_error)))
