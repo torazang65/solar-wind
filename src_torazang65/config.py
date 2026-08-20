@@ -24,7 +24,7 @@ if torch.cuda.is_available():
 DATA_ROOT = Path("public_dataset/competition_dataset_6h")
 # train.py가 시작 시 기존 best_model.pth를 지우므로, 런이 바뀔 때마다
 # 이름을 올려 이전 산출물을 보존한다.
-OUTPUT_DIR = Path(f"outputs/transformer_v6b_dynamics_torazang65_seed{SEED}")
+OUTPUT_DIR = Path(f"outputs/transformer_v7_srcmap_torazang65_seed{SEED}")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 CACHE_DIR = Path("outputs/cache")
 
@@ -69,6 +69,32 @@ HINDCAST_LAMBDA_DECAY_EPOCHS = 8
 # ballistic 잔차(tanh 출력 = delta/24h)의 L2 계수. tau를 D_eff/s
 # backbone 근방에 잡아둬 "값을 아무 시점에나 배치"하는 퇴화를 막는다.
 TRANSIT_RESIDUAL_L2 = 3e-3
+
+# ---- v7: backmapping alignment 보조 손실 ----
+# 진단(v6b): hindcast/forecast는 값(value)만 감독해 RMSE 최적해가
+# "여러 소스를 넓게 평균"이 되고, 그 뭉갬이 속도 조건부 정렬을
+# 구조적으로 억압했다 (COM 속도군 분화 7h vs 이론 30h, gate 9.1,
+# coverage 0.97). 이 손실은 위치(location)를 직접 감독한다:
+#
+#   label (u, y_u)에서 radial 통과시간 tau* = D_eff/y_u를 역산하면
+#   책임 소스의 출발 시각은 u - tau* (출발 시 CM). 자전을 되감으면
+#   각 프레임(age a)에서 그 소스가 보였던 경도
+#       lon*(a) = -omega * (u - tau* + a)
+#   가 나온다 -- (frame, lon-cell) 격자 위의 궤적. 이 궤적 주변
+#   가우시안(soft 타깃 q)과 모델의 정규화 kernel weight를 KL로 맞춘다.
+#
+# u는 hindcast 격자(-72..0h, 관측 wind -- 누수 없음)와 forecast 격자
+# (+6..+72h, train label)를 모두 쓴다. |lon*| > 90도(가시 원반 밖)인
+# (frame, u)는 타깃 질량 0, 전 프레임이 밖이면 그 u는 손실 제외.
+# tau* 계산의 D_eff는 모델이 학습 중인 값을 detach해 사용 -- 물리
+# 상수를 박으면 모델 내부 스케일과 어긋나 residual이 갭을 메운다.
+#
+# LAMBDA: KL 스케일은 O(1)(퍼펙트 매치 0, 초기 ~2-4), forecast loss는
+# ~0.08이므로 0.02면 초기 기여 ~0.05 (동급). 판정 후 스윕 후보.
+# SIGMA_DEG: SIR 압축/가속으로 지구 y_u != 출발 속도라 타깃은 soft해야
+# 한다. 20도 = 자전 ~36h; transit residual +-24h(=13도)를 덮는 폭.
+ALIGN_LAMBDA = 0.02
+ALIGN_SIGMA_DEG = 20.0
 
 # ---- v5b: surge head 보조 손실 ----
 # label: max_h W(t+h) - last_wind > threshold (speed_ablation의 surge
@@ -148,6 +174,20 @@ PHYSICAL_LR_MULT = 100.0
 #       correction 재도입이 아니라 base의 AR(2) 강화다 (correction의
 #       quiet 기여 실체는 wind 단기 자기상관 표현으로 추정 --
 #       taeukjung 브랜치에서 AR(2) 검증됨).
+# v7 (srcmap): 소스 단위를 프레임 x 디스크 cell(20x2x4)로 분해, 자전
+# 기하를 도착 공식에 내장(arrival = -lon/omega + D/s - age), label
+# 역산 backmapping alignment KL 추가 (위 ALIGN_* 주석). 구조 근거:
+# v6b에서 정렬이 속도 무관 고정 템플릿(tau~84h, COM 분화 7h vs 이론
+# 30h)으로 퇴화 -- 값 감독만으로는 "넓게 평균"이 RMSE 최적해라 위치
+# 감독과 경도 분해가 필요하다. head는 cell 공유(+좌표 2 입력)라
+# 파라미터 순증 ~0.5k. 이전 체크포인트와 호환 안 됨.
+# 판정 (seed 3개: 777/1234/2024, analysis.py):
+#   (1) launch-age COM의 slow-fast 분화 7h -> >=20h (이론 ~30h)
+#   (2) 궤적 추적: (sample,u) 내 lon-vs-age 기울기 ~ -0.55 deg/h
+#   (3) best epoch > 10 + best 시점 train-val gap 축소 (과적합 완화의
+#       "when" 몫이 실재하는지)
+#   (4) val <= 67.5 (v6a 재현 이상) + surge/quiet 이득 유지
+#   (5) gate 뭉갬 해소: coverage/align KL 하락 추세
 MODEL_KWARGS = dict(
     d_model=128,
     nhead=8,
