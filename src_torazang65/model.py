@@ -843,9 +843,16 @@ class SolarWindBaseline(nn.Module):
                 base + alpha * (v_image_future - base) + correction
             )
             self.last_fusion_alpha = alpha.detach()
+            self.last_v_image_future = v_image_future.detach()
         else:
             prediction = base + correction
             self.last_fusion_alpha = None
+            self.last_v_image_future = None
+
+        # 분석용 (branch_decomposition.py): 출력 성분 분해.
+        # pred = base + alpha*(v_img - base) + correction
+        self.last_base = base.detach().expand(batch_size, 12)
+        self.last_correction = correction.detach()
 
         if return_aux:
             return prediction, {
