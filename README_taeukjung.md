@@ -416,3 +416,25 @@ CEA grid, soft-cubic strength 0.25, and an isolated output directory at
 `/home/jovyan/outputs/solar_arrival_v9_taeukjung`. The local launcher requires
 the `ASAI` conda environment. Architecture and diagnostics are documented in
 `MODEL_V9_taeukjung.md`.
+
+## Baseline Transformer v2.1
+
+V2.1 restarts from the official Inception3D baseline after V9's 64 px run
+overfit after epoch 2. It masks the solar disk, adds signed six-hour image
+differences, replaces the image LSTM with one small temporal Transformer and
+forecast cross-attention block, and applies a bounded gated image correction
+to a strong wind-only forecast. Image and L1-wind timelines remain separate
+until the forecast decoder.
+
+Server training, inference, and diagnostics:
+
+```bash
+bash scripts_taeukjung/run_baseline_v2_1_server_cuda.sh train
+bash scripts_taeukjung/run_baseline_v2_1_server_cuda.sh infer
+bash scripts_taeukjung/run_baseline_v2_1_server_cuda.sh diagnose
+```
+
+The default is 64 px with 602,640 parameters, warmup plus cosine decay, EMA,
+time masking, image-path dropout, and ordinary row shuffling. Outputs go to
+`/home/jovyan/outputs/baseline_v2_1_taeukjung`. See
+`MODEL_BASELINE_V2_1_taeukjung.md` for the full architecture and rationale.

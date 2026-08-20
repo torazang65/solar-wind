@@ -285,3 +285,28 @@ chain-macro RMSE. This improves the matching V6 control by 0.903 km/s and V8 by
 0.336 km/s. The image path improved its wind-only prediction by 7.785 km/s, and
 the gate followed the intended arrival-time ordering. A complete 128 px CUDA
 run remains necessary.
+
+## Baseline Transformer V2.1 restart
+
+The complete V9 64 px log showed immediate generalization loss: validation RMSE
+was best at `69.174` on epoch 2, while training RMSE continued from `64.151` to
+below `51` and validation rose above `73`. V2.1 therefore restarts from the
+official baseline CNN instead of extending V9's learned-arrival subsystem.
+
+Changes relative to the official baseline:
+
+- circular disk masking before feature extraction;
+- two signed, scaled six-hour delta channels added to the two intensity channels;
+- the official multi-scale Inception3D image CNN retained;
+- image LSTM replaced by one 96-wide temporal Transformer and one forecast
+  cross-attention block;
+- image and L1-wind histories kept separate until forecast decoding;
+- weak speed-derived timing bias, bounded gated image residual, time masking,
+  modality dropout, warmup/cosine learning rate, and EMA.
+
+Local implementation checks completed on MPS at both 64 and 128 px. A real-data
+smoke run completed training, strict EMA checkpoint reload, full validation
+inference, `(3868, 13)` test submission generation, and preprocessing/attention/
+representation diagnostics. The smoke run used only 512 training rows and is
+not a performance result. The next comparison is the complete default 64 px
+CUDA run against V6 `67.118` and V7 `67.328`.

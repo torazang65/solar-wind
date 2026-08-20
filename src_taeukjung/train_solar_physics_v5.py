@@ -282,6 +282,12 @@ def main(
     residual_l2_weight=0.0,
     ema_decay=None,
     use_baseline_residual_scale=False,
+    scheduler_kind="plateau",
+    warmup_epochs=0,
+    minimum_learning_rate=1e-6,
+    optimizer_weight_decay=0.05,
+    early_stopping_patience=8,
+    grid_label="cea_grid",
 ):
     wind_only = os.getenv("WIND_ONLY", "0").lower() in {"1", "true", "yes"}
     chain_balanced = os.getenv("CHAIN_BALANCED_SAMPLING", "1").lower() not in {
@@ -372,11 +378,35 @@ def main(
         **model_kwargs,
     ).to(DEVICE)
     optimizer = torch.optim.AdamW(
-        model.parameters(), lr=SOLAR_PROBABILISTIC_LR, weight_decay=0.05
+        model.parameters(),
+        lr=SOLAR_PROBABILISTIC_LR,
+        weight_decay=optimizer_weight_decay,
     )
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="min", factor=0.25, patience=3, min_lr=1e-6
-    )
+    if scheduler_kind == "plateau":
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode="min",
+            factor=0.25,
+            patience=3,
+            min_lr=minimum_learning_rate,
+        )
+    elif scheduler_kind == "warmup_cosine":
+        if not 0 < warmup_epochs < EPOCHS:
+            raise ValueError("warmup_epochs must be between 1 and EPOCHS - 1")
+
+        def learning_rate_factor(step):
+            if step < warmup_epochs:
+                return (step + 1) / warmup_epochs
+            progress = (step - warmup_epochs) / max(1, EPOCHS - warmup_epochs)
+            floor = minimum_learning_rate / SOLAR_PROBABILISTIC_LR
+            cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+            return floor + (1.0 - floor) * cosine
+
+        scheduler = torch.optim.lr_scheduler.LambdaLR(
+            optimizer, learning_rate_factor
+        )
+    else:
+        raise ValueError(f"unknown scheduler_kind: {scheduler_kind}")
     scaler = torch.amp.GradScaler(AMP_DEVICE_TYPE, enabled=USE_AMP)
     ema = ExponentialMovingAverage(model, ema_decay) if ema_decay is not None else None
     checkpoint_path = OUTPUT_DIR / f"best_{file_stem}.pth"
@@ -399,20 +429,21 @@ def main(
     print(
         f"architecture={file_stem} device={DEVICE} parameters={parameter_count:,} "
         f"wind_only={wind_only} image_size={IMAGE_SIZE} "
-        f"cea_grid={latitude_bins}x{longitude_bins} "
+        f"{grid_label}={latitude_bins}x{longitude_bins} "
         f"train_chains={train_chains.count} val_chains={val_chains.count} "
         f"chain_balanced={chain_balanced} lr={SOLAR_PROBABILISTIC_LR:.2e} "
         f"wind_aux_weight={wind_aux_weight:.2f} "
         f"north_south_flip={training_image_flip_probability:.2f} "
         f"residual_l2={residual_l2_weight:.3f} "
-        f"ema_decay={ema_decay} loss=mse_km_s"
+        f"ema_decay={ema_decay} scheduler={scheduler_kind} "
+        f"weight_decay={optimizer_weight_decay:.3f} loss=mse_km_s"
     )
     print(
         f"linear_baseline_val_rmse={baseline_micro:.3f} "
         f"linear_baseline_chain_macro_rmse={baseline_macro:.3f}"
     )
 
-    patience = 8
+    patience = int(early_stopping_patience)
     best_val_rmse = float("inf")
     epochs_without_improvement = 0
     history = []
@@ -443,8 +474,11 @@ def main(
                 collect_predictions=True,
             )
 
-        scheduler.step(val_metrics["rmse"])
         learning_rate = optimizer.param_groups[0]["lr"]
+        if scheduler_kind == "plateau":
+            scheduler.step(val_metrics["rmse"])
+        else:
+            scheduler.step()
         elapsed = time.perf_counter() - started
         history.append(
             {
@@ -510,9 +544,15 @@ def main(
                         "solar_cea_radius_fraction": SOLAR_CEA_RADIUS_FRACTION,
                         "feature_schema": feature_schema,
                         "cea_grid": [latitude_bins, longitude_bins],
+                        "feature_grid": [latitude_bins, longitude_bins],
+                        "feature_grid_label": grid_label,
                         "north_south_flip_probability": training_image_flip_probability,
                         "residual_l2_weight": residual_l2_weight,
                         "ema_decay": ema_decay,
+                        "scheduler": scheduler_kind,
+                        "warmup_epochs": warmup_epochs,
+                        "minimum_learning_rate": minimum_learning_rate,
+                        "optimizer_weight_decay": optimizer_weight_decay,
                     },
                 },
                 checkpoint_path,

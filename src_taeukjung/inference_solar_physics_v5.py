@@ -32,6 +32,7 @@ def load_best_model(
     model_class=SolarWindPhysicsTransformerV5,
     architecture_name="SolarWindPhysicsTransformerV5",
     file_stem="solar_physics_v5",
+    grid_label="cea_grid",
 ):
     checkpoint_path = OUTPUT_DIR / f"best_{file_stem}.pth"
     checkpoint = torch.load(checkpoint_path, map_location=DEVICE, weights_only=True)
@@ -44,11 +45,15 @@ def load_best_model(
     current_preprocess = {
         "image_size": IMAGE_SIZE,
         "image_norm": IMAGE_NORM,
-        "soft_cubic_strength": SOFT_CUBIC_STRENGTH,
         "solar_disk_mask": SOLAR_DISK_MASK,
         "solar_disk_radius_fraction": SOLAR_DISK_RADIUS_FRACTION,
         "solar_cea_radius_fraction": SOLAR_CEA_RADIUS_FRACTION,
     }
+    if (
+        IMAGE_NORM == "soft_cubic"
+        or checkpoint_preprocess["image_norm"] == "soft_cubic"
+    ):
+        current_preprocess["soft_cubic_strength"] = SOFT_CUBIC_STRENGTH
     for key, value in current_preprocess.items():
         if checkpoint_preprocess[key] != value:
             raise ValueError(
@@ -64,7 +69,7 @@ def load_best_model(
         f"val_rmse={checkpoint['val_rmse_km_s']:.3f} "
         f"val_chain_macro_rmse={checkpoint['val_chain_macro_rmse_km_s']:.3f} "
         f"image_size={checkpoint['model_kwargs']['image_size']} "
-        f"cea_grid={checkpoint['model_kwargs']['latitude_bins']}x"
+        f"{grid_label}={checkpoint['model_kwargs']['latitude_bins']}x"
         f"{checkpoint['model_kwargs']['longitude_bins']}"
     )
     return model
@@ -115,8 +120,11 @@ def main(
     model_class=SolarWindPhysicsTransformerV5,
     architecture_name="SolarWindPhysicsTransformerV5",
     file_stem="solar_physics_v5",
+    grid_label="cea_grid",
 ):
-    model = load_best_model(model_class, architecture_name, file_stem)
+    model = load_best_model(
+        model_class, architecture_name, file_stem, grid_label=grid_label
+    )
     val_chains = infer_temporal_chains(val_inputs, IMAGE_COLUMNS)
     val_dataset = ChainAwareSolarWindDataset(
         val_image_array,
