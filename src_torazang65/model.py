@@ -2,37 +2,51 @@ import torch
 from torch import nn
 
 
+def conv_block(in_channels, out_channels, kernel_size, padding=0):
+    """Conv3d -> BatchNorm3d -> ReLU.
+
+    The CNN previously had no normalization at all, which is the piece
+    it was actually missing (residual connections would do little at a
+    7-layer depth). BatchNorm adds only ~1.2k parameters in total.
+    conv bias is dropped because BatchNorm's shift subsumes it.
+    """
+    return nn.Sequential(
+        nn.Conv3d(
+            in_channels,
+            out_channels,
+            kernel_size,
+            padding=padding,
+            bias=False,
+        ),
+        nn.BatchNorm3d(out_channels),
+        nn.ReLU(inplace=True),
+    )
+
+
 class Inception3D(nn.Module):
     def __init__(self, in_channels, branch_channels=32):
         super().__init__()
 
-        self.branch_1 = nn.Sequential(
-            nn.Conv3d(in_channels, branch_channels, 1),
-            nn.ReLU(inplace=True),
-        )
+        self.branch_1 = conv_block(in_channels, branch_channels, 1)
 
         self.branch_3 = nn.Sequential(
-            nn.Conv3d(in_channels, branch_channels, 1),
-            nn.ReLU(inplace=True),
-            nn.Conv3d(
+            conv_block(in_channels, branch_channels, 1),
+            conv_block(
                 branch_channels,
                 branch_channels,
                 (1, 3, 3),
                 padding=(0, 1, 1),
             ),
-            nn.ReLU(inplace=True),
         )
 
         self.branch_5 = nn.Sequential(
-            nn.Conv3d(in_channels, branch_channels, 1),
-            nn.ReLU(inplace=True),
-            nn.Conv3d(
+            conv_block(in_channels, branch_channels, 1),
+            conv_block(
                 branch_channels,
                 branch_channels,
                 (1, 5, 5),
                 padding=(0, 2, 2),
             ),
-            nn.ReLU(inplace=True),
         )
 
         self.branch_pool = nn.Sequential(
@@ -41,8 +55,7 @@ class Inception3D(nn.Module):
                 stride=1,
                 padding=(0, 1, 1),
             ),
-            nn.Conv3d(in_channels, branch_channels, 1),
-            nn.ReLU(inplace=True),
+            conv_block(in_channels, branch_channels, 1),
         )
 
     def forward(self, x):
@@ -64,6 +77,7 @@ class SolarWindBaseline(nn.Module):
         wind_dim=64,
         image_size=64,
         use_images=True,
+        time_mask_prob=0.15,
         nhead=8,
         num_encoder_layers=3,
         num_decoder_layers=2,
@@ -86,13 +100,12 @@ class SolarWindBaseline(nn.Module):
         # ============================================================
 
         self.stem = nn.Sequential(
-            nn.Conv3d(
+            conv_block(
                 2,
                 32,
-                kernel_size=(1, 5, 5),
+                (1, 5, 5),
                 padding=(0, 2, 2),
             ),
-            nn.ReLU(inplace=True),
 
             nn.MaxPool3d(
                 kernel_size=(1, 3, 3),
@@ -142,6 +155,21 @@ class SolarWindBaseline(nn.Module):
         # model sees wind history only. Parameters are still built, so
         # checkpoints stay compatible between the two modes.
         self.use_images = use_images
+
+        # Temporal masking augmentation (SpecAugment style). During
+        # training each timestep's image slice is zeroed independently
+        # with this probability, so the model cannot lean on any single
+        # frame. Only the image slice is masked -- wind is the stronger
+        # signal and masking it costs more than it buys.
+        #
+        # This targets the real constraint: 9,607 samples drawn with a
+        # 6h stride over 6.9 years of data means only a few hundred
+        # effectively independent examples.
+        #
+        # No 1/(1-p) rescaling: token_norm renormalizes every token
+        # after the positional embedding is added, so a masked token is
+        # already on the same scale as an unmasked one.
+        self.time_mask_prob = time_mask_prob
 
         # -> image slice of the fused token
         #
@@ -338,6 +366,20 @@ class SolarWindBaseline(nn.Module):
             image_tokens = self.image_projection(
                 image_features
             )
+
+            # (B,20,1) Bernoulli keep-mask, resampled every forward
+            # pass. Training only -- evaluation sees every frame.
+            if self.training and self.time_mask_prob > 0:
+                keep = (
+                    torch.rand(
+                        image_tokens.size(0),
+                        image_tokens.size(1),
+                        1,
+                        device=image_tokens.device,
+                    )
+                    >= self.time_mask_prob
+                )
+                image_tokens = image_tokens * keep
         else:
             # wind-only diagnostic: skip the CNN and blank the image
             # slice. dtype follows wind_tokens so this stays correct

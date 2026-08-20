@@ -49,6 +49,9 @@ MODEL_KWARGS = dict(
     num_decoder_layers=1,
     dim_feedforward=256,
     dropout=0.1,
+    # 학습 중 이미지 토큰을 타임스텝 단위로 마스킹하는 확률.
+    # 0으로 두면 증강이 꺼진다. 주된 스윕 대상.
+    time_mask_prob=0.15,
 )
 
 # ==========================================
