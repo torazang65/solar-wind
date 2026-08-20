@@ -171,3 +171,40 @@ reuses `/home/jovyan/outputs/cache_taeukjung/64px` and writes to the separate
 
 The implementation only uses packages already required by the baseline:
 PyTorch, NumPy, pandas, Pillow, and matplotlib.
+
+## Solar geometry probabilistic Transformer v2
+
+V2 keeps the v1 training and inference paths unchanged. It makes two focused
+image-front-end changes:
+
+- CEA brightness and darkness are no longer multiplied by `mu`; `mu` remains
+  available as an independent coordinate channel.
+- Each timestamp keeps a 4 by 8 latitude-longitude grid, producing 32 spatial
+  tokens instead of v1's 16. Across 20 timestamps, the forecast queries attend
+  to 640 spatial tokens.
+
+The server launcher defaults to 128 px, batch size 64, 25 maximum epochs,
+learning rate `1e-4`, and dropout 0.25. V2 writes its checkpoint and outputs to
+`/home/jovyan/outputs/solar_probabilistic_v2_taeukjung`, so it cannot overwrite
+v1 results.
+
+Local Apple MPS:
+
+```bash
+bash scripts_taeukjung/run_solar_probabilistic_v2_local_mps.sh train
+bash scripts_taeukjung/run_solar_probabilistic_v2_local_mps.sh infer
+```
+
+Competition server CUDA:
+
+```bash
+bash scripts_taeukjung/run_solar_probabilistic_v2_server_cuda.sh train
+bash scripts_taeukjung/run_solar_probabilistic_v2_server_cuda.sh infer
+```
+
+The rectangular token grid can be overridden without editing code:
+
+```bash
+SOLAR_V2_SPATIAL_HEIGHT=4 SOLAR_V2_SPATIAL_WIDTH=8 \
+  bash scripts_taeukjung/run_solar_probabilistic_v2_server_cuda.sh train
+```
