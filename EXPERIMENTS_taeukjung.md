@@ -310,3 +310,33 @@ inference, `(3868, 13)` test submission generation, and preprocessing/attention/
 representation diagnostics. The smoke run used only 512 training rows and is
 not a performance result. The next comparison is the complete default 64 px
 CUDA run against V6 `67.118` and V7 `67.328`.
+
+The reported V2.1 64 px CUDA run through epoch 65 had its best validation RMSE
+of `70.803` at epoch 51. Training RMSE was `58.372`, temporal-attention entropy
+was about `0.898`, and the image gate was about `0.411` at that checkpoint. The
+image path improved the roughly `76.25` wind-only validation score, but the
+one-token-per-time representation had not approached V6 or V7.
+
+## Baseline Spatial Transformer V2.2
+
+V2.2 tests one isolated hypothesis from the V2.1 result: the Transformer needs
+the CNN's spatial representation before it is flattened. All preprocessing,
+wind modeling, bounded residual fusion, loss, optimizer family, sampling, and
+64 px input remain controlled.
+
+| Property | V2.1 | V2.2 |
+| --- | ---: | ---: |
+| Transformer memory shape | 20 x 96 | 320 x 128 |
+| Values in memory | 1,920 | 40,960 |
+| Parameters | 602,640 | 669,680 |
+| Timing prior default | 0.10 | 0.0 |
+
+V2.2 uses separate spatial attention over 16 cells and temporal attention over
+20 times. Its factorized encoder needs 11,520 scores per head and sample instead
+of 102,400 for full attention over 320 tokens.
+
+Local checks completed at 64 and 128 px on MPS. A real-data smoke run completed
+training, EMA checkpoint reload, full validation inference, `(3868, 13)` test
+submission generation, and temporal/spatial attention diagnostics. The smoke
+run used only 128 training rows and is not a performance estimate. The next
+decision point is the complete 64 px CUDA validation RMSE.

@@ -438,3 +438,22 @@ The default is 64 px with 602,640 parameters, warmup plus cosine decay, EMA,
 time masking, image-path dropout, and ordinary row shuffling. Outputs go to
 `/home/jovyan/outputs/baseline_v2_1_taeukjung`. See
 `MODEL_BASELINE_V2_1_taeukjung.md` for the full architecture and rationale.
+
+## Baseline Spatial Transformer v2.2
+
+V2.2 removes V2.1's `2048 -> 96` per-timestamp bottleneck. The official
+Inception3D front end still produces a 4 by 4 map, but all 16 cells at all 20
+timestamps are retained as 320 independent 128-dimensional tokens. A
+factorized block applies spatial attention and temporal attention separately,
+then the 12 forecast queries read the complete token memory. The default
+ballistic timing prior is disabled.
+
+```bash
+bash scripts_taeukjung/run_baseline_v2_2_server_cuda.sh train
+bash scripts_taeukjung/run_baseline_v2_2_server_cuda.sh infer
+bash scripts_taeukjung/run_baseline_v2_2_server_cuda.sh diagnose
+```
+
+The default server run uses 64 px, batch size 128, and an isolated output at
+`/home/jovyan/outputs/baseline_v2_2_taeukjung`. See
+`MODEL_BASELINE_V2_2_taeukjung.md` for dimensions, diagnostics, and commands.

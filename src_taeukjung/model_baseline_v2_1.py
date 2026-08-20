@@ -214,6 +214,7 @@ class SolarWindBaselineTransformerV21(nn.Module):
         self.use_images = bool(use_images)
         self.d_model = int(d_model)
         self.nhead = int(nhead)
+        self.memory_spatial_tokens = 1
         self.image_time_mask_probability = float(
             image_time_mask_probability
         )
@@ -383,11 +384,52 @@ class SolarWindBaselineTransformerV21(nn.Module):
         bias = -0.5 * strength * (
             error / self.timing_prior_sigma_hours
         ).square()
+        if self.memory_spatial_tokens > 1:
+            bias = bias.unsqueeze(-1).expand(
+                -1, -1, -1, self.memory_spatial_tokens
+            ).reshape(bias.shape[0], FORECAST_STEPS, -1)
         return (
             bias.to(dtype=dtype).repeat_interleave(self.nhead, dim=0),
             nominal_transit,
             strength,
         )
+
+    def _attention_statistics(self, attention_weights):
+        normalized = attention_weights / attention_weights.sum(
+            dim=-1, keepdim=True
+        ).clamp_min(1e-8)
+        token_weights = normalized.reshape(
+            normalized.shape[0],
+            FORECAST_STEPS,
+            OBSERVED_STEPS,
+            self.memory_spatial_tokens,
+        )
+        temporal_weights = token_weights.sum(dim=-1)
+        spatial_weights = token_weights.sum(dim=-2)
+        temporal_entropy = -torch.sum(
+            temporal_weights * torch.log(temporal_weights.clamp_min(1e-8)),
+            dim=-1,
+        ) / math.log(OBSERVED_STEPS)
+        if self.memory_spatial_tokens > 1:
+            spatial_entropy = -torch.sum(
+                spatial_weights * torch.log(spatial_weights.clamp_min(1e-8)),
+                dim=-1,
+            ) / math.log(self.memory_spatial_tokens)
+        else:
+            spatial_entropy = torch.zeros_like(temporal_entropy)
+        expected_age = torch.sum(
+            temporal_weights
+            * self.image_age_hours.to(temporal_weights.dtype).view(1, 1, -1),
+            dim=-1,
+        )
+        return {
+            "token_weights": token_weights,
+            "temporal_weights": temporal_weights,
+            "spatial_weights": spatial_weights,
+            "temporal_entropy": temporal_entropy,
+            "spatial_entropy": spatial_entropy,
+            "expected_age": expected_age,
+        }
 
     def encode_images(self, images):
         features, masked, delta = self.image_encoder(images)
@@ -432,6 +474,7 @@ class SolarWindBaselineTransformerV21(nn.Module):
             self._last_training_diagnostics = {
                 "attention_age_h": wind.new_tensor(0.0),
                 "attention_entropy": wind.new_tensor(0.0),
+                "spatial_attention_entropy": wind.new_tensor(0.0),
                 "nominal_transit_h": wind.new_tensor(0.0),
                 "image_gate": wind.new_tensor(0.0),
                 "timing_prior_strength": F.softplus(
@@ -466,9 +509,7 @@ class SolarWindBaselineTransformerV21(nn.Module):
             memory_mask=timing_bias,
             need_weights=True,
         )
-        diagnostic_attention = attention_weights / attention_weights.sum(
-            dim=-1, keepdim=True
-        ).clamp_min(1e-8)
+        attention = self._attention_statistics(attention_weights)
 
         repeated_wind = wind_features.unsqueeze(1).expand(
             -1, FORECAST_STEPS, -1
@@ -488,19 +529,12 @@ class SolarWindBaselineTransformerV21(nn.Module):
         )
         prediction = wind_prediction + fusion_residual
 
-        entropy = -torch.sum(
-            diagnostic_attention
-            * torch.log(diagnostic_attention.clamp_min(1e-8)),
-            dim=-1,
-        ) / math.log(OBSERVED_STEPS)
-        expected_age = torch.sum(
-            diagnostic_attention
-            * self.image_age_hours.to(diagnostic_attention.dtype).view(1, 1, -1),
-            dim=-1,
-        )
         self._last_training_diagnostics = {
-            "attention_age_h": expected_age.detach().mean(),
-            "attention_entropy": entropy.detach().mean(),
+            "attention_age_h": attention["expected_age"].detach().mean(),
+            "attention_entropy": attention["temporal_entropy"].detach().mean(),
+            "spatial_attention_entropy": attention[
+                "spatial_entropy"
+            ].detach().mean(),
             "nominal_transit_h": nominal_transit.detach().mean(),
             "image_gate": image_gate.detach().mean(),
             "timing_prior_strength": prior_strength.detach(),
@@ -510,9 +544,12 @@ class SolarWindBaselineTransformerV21(nn.Module):
         diagnostics = None
         if return_diagnostics:
             diagnostics = {
-                "attention_weights": diagnostic_attention,
-                "attention_expected_age_hours": expected_age,
-                "attention_entropy": entropy,
+                "attention_weights": attention["temporal_weights"],
+                "attention_token_weights": attention["token_weights"],
+                "attention_spatial_weights": attention["spatial_weights"],
+                "attention_expected_age_hours": attention["expected_age"],
+                "attention_entropy": attention["temporal_entropy"],
+                "attention_spatial_entropy": attention["spatial_entropy"],
                 "nominal_transit_hours": nominal_transit,
                 "image_gate": image_gate,
                 "timing_prior_strength": prior_strength,
