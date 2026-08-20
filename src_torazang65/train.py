@@ -27,7 +27,43 @@ model = SolarWindBaseline(
     image_size=IMAGE_SIZE, use_images=not WIND_ONLY, **MODEL_KWARGS
 ).to(DEVICE)
 print(f"파라미터 수: {sum(p.numel() for p in model.parameters())/1e6:.2f}M", flush=True)
-optimizer = torch.optim.AdamW(model.parameters(), lr=PEAK_LR, weight_decay=0.01)
+
+# v5a: 물리 스칼라 전용 param group. AdamW의 스텝 크기는 gradient
+# 스케일과 무관하게 ~lr이라, 총 이동 예산이 sum(lr) ~= 0.1 수준이다.
+# 자연 스케일이 O(1)~O(10)인 스칼라(reversion logit -4->0, gate bias
+# -2->0, dist_eff raw 등)는 base lr로는 초기값에 얼어붙는다 -- v2/v3
+# prior gate(-4)가 유인과 무관하게 기계적으로 못 열린 원인이기도
+# 하다 (v3의 tau 이동 관측치 ~0.4h가 이 예산과 정량 일치). 100x lr,
+# weight decay 0 (decay가 물리 상수를 0으로 끌어당기지 않도록).
+def is_physical_param(name):
+    return (
+        name in {
+            "dist_eff_raw", "reversion_logit",
+            "climatology", "fallback_weight_raw",
+        }
+        or name.startswith("fusion_gate_head.")
+        or name in {
+            "source_speed_head.bias", "source_gate_head.bias",
+            "transit_residual_head.bias",
+        }
+    )
+
+physical_params = [
+    p for n, p in model.named_parameters() if is_physical_param(n)
+]
+base_params = [
+    p for n, p in model.named_parameters() if not is_physical_param(n)
+]
+optimizer = torch.optim.AdamW(
+    [
+        {"params": base_params, "lr": PEAK_LR, "weight_decay": 0.01},
+        {
+            "params": physical_params,
+            "lr": PEAK_LR * PHYSICAL_LR_MULT,
+            "weight_decay": 0.0,
+        },
+    ]
+)
 
 # warmup 후 cosine, epoch 단위 step. LambdaLR 인자는 지금까지 step된
 # 횟수(0-index)라 첫 에폭은 PEAK_LR * 1/WARMUP_EPOCHS에서 시작하고,
@@ -60,6 +96,8 @@ def run_epoch(loader, training, hindcast_lambda):
     value_count = 0
     hindcast_squared_error_sum = 0.0
     hindcast_value_count = 0.0
+    diag_sums = {}
+    diag_batches = 0
     for batch in loader:
         images = batch["images"].to(DEVICE, non_blocking=PIN_MEMORY)
         wind = batch["wind"].to(DEVICE, non_blocking=PIN_MEMORY)
@@ -123,13 +161,36 @@ def run_epoch(loader, training, hindcast_lambda):
                 (keep.sum() * hindcast_error_km_s.size(1)).cpu()
             )
 
+        # 전파 branch 진단 (val 한정 -- train은 masking 증강이 섞여
+        # 통계가 오염된다). 성공 signature: src_speed_std가 0에서
+        # 벗어나고(상수 430 탈출), coverage/alpha가 오르고, arrival이
+        # 레짐별로 분화. 실패 signature: 전부 초기값 부근 = 이 모델은
+        # persistence + correction일 뿐이라는 뜻.
+        if (not training) and (model.last_source_speed_kms is not None):
+            batch_diag = {
+                "src_speed_mean_kms": float(model.last_source_speed_kms.mean()),
+                "src_speed_std_kms": float(model.last_source_speed_kms.std()),
+                "arrival_mean_h": float(model.last_arrival_hours.mean()),
+                "arrival_std_h": float(model.last_arrival_hours.std()),
+                "source_gate_mean": float(model.last_source_gate.mean()),
+                "coverage_hind_mean": float(model.last_coverage[:, :13].mean()),
+                "coverage_future_mean": float(model.last_coverage[:, 13:].mean()),
+                "alpha_mean": float(model.last_fusion_alpha.mean()),
+            }
+            for key, value in batch_diag.items():
+                diag_sums[key] = diag_sums.get(key, 0.0) + value
+            diag_batches += 1
+
     forecast_rmse = math.sqrt(squared_error_sum / value_count)
     hindcast_rmse = (
         math.sqrt(hindcast_squared_error_sum / hindcast_value_count)
         if hindcast_value_count > 0
         else float("nan")
     )
-    return forecast_rmse, hindcast_rmse
+    diag = {
+        key: value / diag_batches for key, value in diag_sums.items()
+    }
+    return forecast_rmse, hindcast_rmse, diag
 
 if __name__ == "__main__":
     for epoch in range(1, EPOCHS + 1):
@@ -144,28 +205,28 @@ if __name__ == "__main__":
             + (HINDCAST_LAMBDA_END - HINDCAST_LAMBDA_START)
             * decay_progress
         )
-        train_rmse, train_hindcast_rmse = run_epoch(
+        train_rmse, train_hindcast_rmse, _ = run_epoch(
             train_loader, training=True, hindcast_lambda=hindcast_lambda
         )
         with torch.no_grad():
-            val_rmse, val_hindcast_rmse = run_epoch(
+            val_rmse, val_hindcast_rmse, val_diag = run_epoch(
                 val_loader, training=False, hindcast_lambda=hindcast_lambda
             )
 
         # 이번 에폭이 실제로 쓴 lr을 기록한 뒤 다음 에폭 값으로 step.
+        # (group 0 = base. 물리 group은 PHYSICAL_LR_MULT배로 동행.)
         learning_rate = optimizer.param_groups[0]["lr"]
         scheduler.step()
         elapsed = time.perf_counter() - started
 
         # mechanism 지표. beta_h: persistence의 climatology 복귀율
-        # (h 단조 증가가 기대 방향). alpha: 전파 branch 신뢰도 (마지막
-        # val 배치의 평균 -- 대략적 추이 관찰용).
+        # (h 단조 증가가 기대 방향). dist_eff: 유효 전파 거리 [30,55]h.
+        # 나머지 전파 진단은 val_diag (run_epoch, val 전체 평균).
         beta_mean = float(torch.sigmoid(model.reversion_logit).mean())
-        alpha_mean = (
-            float(model.last_fusion_alpha.mean())
-            if model.last_fusion_alpha is not None
-            else float("nan")
+        dist_eff_h = float(
+            30.0 + 25.0 * torch.sigmoid(model.dist_eff_raw.detach())
         )
+        alpha_mean = val_diag.get("alpha_mean", float("nan"))
 
         history.append({
             "epoch": epoch, "train_rmse_km_s": train_rmse,
@@ -173,12 +234,16 @@ if __name__ == "__main__":
             "train_hindcast_rmse_km_s": train_hindcast_rmse,
             "val_hindcast_rmse_km_s": val_hindcast_rmse,
             "hindcast_lambda": hindcast_lambda,
-            "alpha_mean": alpha_mean, "beta_mean": beta_mean,
+            "beta_mean": beta_mean, "dist_eff_h": dist_eff_h,
+            **val_diag,
             "learning_rate": learning_rate, "seconds": elapsed,
         })
         print(
             f"epoch={epoch:03d} train_rmse={train_rmse:.3f} val_rmse={val_rmse:.3f}"
             f" hind={val_hindcast_rmse:.1f} alpha={alpha_mean:.3f} beta={beta_mean:.3f}"
+            f" vstd={val_diag.get('src_speed_std_kms', float('nan')):.0f}"
+            f" cov={val_diag.get('coverage_hind_mean', float('nan')):.2f}"
+            f" D={dist_eff_h:.1f}"
             f" lr={learning_rate:.2e} seconds={elapsed:.1f}"
         )
         

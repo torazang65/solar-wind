@@ -407,10 +407,13 @@ class SolarWindBaseline(nn.Module):
 
         # ballistic 상수: tau[h] = dist_eff / s[/1000 km/s 스케일].
         # 1 AU = 1.496e8 km / 3.6e6 = 41.6. 학습 가능 -- Parker
-        # spiral/가속 구간의 평균 효과를 흡수한다.
+        # spiral/가속 구간의 평균 효과를 흡수한다 -- 하되 sigmoid로
+        # [30, 55]에 유계: tau(430 km/s)가 [70, 128]h. raw가 O(1)
+        # 스케일이 되어 물리 param group(train.py, 고lr)과 맞물린다.
+        # init -0.144 -> 41.6.
         # (참고: v2/v3 주석의 "[48,120]h = 800..300 km/s"는 오류였다.
         #  실제 ballistic은 800->52h, 300->139h.)
-        self.dist_eff = nn.Parameter(torch.tensor(41.6))
+        self.dist_eff_raw = nn.Parameter(torch.tensor(-0.144))
         # kernel 폭 sigma. 6h 격자에서 ±1스텝 0.88, ±4스텝 0.14.
         # 고정 상수 -- 실험 표면(튜닝 노브)을 늘리지 않는다.
         self.kernel_sigma_hours = 12.0
@@ -458,6 +461,7 @@ class SolarWindBaseline(nn.Module):
         nn.init.constant_(self.fusion_gate_head.bias, -2.0)
 
         # 분석용: 마지막 forward의 전파 변수들 (detached).
+        self.last_coverage = None
         self.last_source_speed_kms = None
         self.last_arrival_hours = None
         self.last_source_gate = None
@@ -624,8 +628,9 @@ class SolarWindBaseline(nn.Module):
                 self.transit_residual_head(image_tokens)
             ).squeeze(-1)
 
+            dist_eff = 30.0 + 25.0 * torch.sigmoid(self.dist_eff_raw)
             transit = (
-                self.dist_eff / source_speed.squeeze(-1)
+                dist_eff / source_speed.squeeze(-1)
                 + 24.0 * transit_residual
             )
             arrival = transit - self.image_age_hours
@@ -654,6 +659,12 @@ class SolarWindBaseline(nn.Module):
                 self.fusion_image_proj(image_tokens.mean(dim=1))
             )
 
+            # coverage: 각 격자점(과거 13 + 미래 12) 재구성에서 이미지
+            # 기여 비율 (1 - fallback 지분). 계속 낮으면 전파 branch가
+            # 사실상 climatology라는 실패 신호.
+            self.last_coverage = (
+                weight.sum(dim=1) / (weight.sum(dim=1) + fallback)
+            ).detach()
             self.last_source_speed_kms = (
                 source_speed.detach().squeeze(-1) * 1000.0
             )
@@ -668,6 +679,7 @@ class SolarWindBaseline(nn.Module):
             transit_residual = None
             v_image_future = None
             image_summary = None
+            self.last_coverage = None
             self.last_source_speed_kms = None
             self.last_arrival_hours = None
             self.last_source_gate = None

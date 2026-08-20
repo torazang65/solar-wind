@@ -62,6 +62,10 @@ HINDCAST_LAMBDA_DECAY_EPOCHS = 20
 # ballistic 잔차(tanh 출력 = delta/24h)의 L2 계수. tau를 D_eff/s
 # backbone 근방에 잡아둬 "값을 아무 시점에나 배치"하는 퇴화를 막는다.
 TRANSIT_RESIDUAL_L2 = 3e-3
+# 물리 스칼라 param group의 lr 배율 (train.py is_physical_param).
+# AdamW 스텝은 ~lr이라 base lr 총합(~0.1)로는 O(1) 스케일 스칼라
+# (reversion logit, gate bias, dist_eff raw)가 초기값에 얼어붙는다.
+PHYSICAL_LR_MULT = 100.0
 
 # ==========================================
 # 3.5 Model architecture
