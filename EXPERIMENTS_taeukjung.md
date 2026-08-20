@@ -256,3 +256,32 @@ screening result only. The complete 128 px CUDA run must beat the verified V1
 score of `66.889` before V8 is promoted.
 
 The full code and literature audit is in `MODEL_REVIEW_V8_taeukjung.md`.
+
+The complete 128 px CUDA run reached its best validation RMSE of `68.966` at
+epoch 8. This is worse than V6 `67.118` and V1 `66.889`; the fixed ballistic
+attention bias is therefore not promoted.
+
+## V9 separate TCNs and learned image arrival
+
+V9 removes Transformer self-attention and separates the image and wind time
+paths. The CEA CNN produces a compact 2 by 4 representation for each image, an
+image-only causal TCN estimates source strength and 48-120 hour transit time,
+and a learned `(forecast horizon, image timestep)` gate aggregates the image
+sequence. A separate wind TCN predicts the wind-only residual before gated
+image fusion.
+
+Implementation verification:
+
+- 182,754 parameters with the default configuration;
+- finite 64 px MPS forward/backward and normalized arrival weights;
+- exact wind-only fallback when images are disabled;
+- real-data smoke training and strict checkpoint reload completed;
+- full validation inference and `(3868, 13)` submission generation completed;
+- diagnostic CSV/JSON and four PNG plots generated successfully.
+
+The controlled 64 px, 1,024-train-row, 512-selection-row, 10-epoch run at
+learning rate `2e-4` scored `68.861` on the complete validation set and `67.095`
+chain-macro RMSE. This improves the matching V6 control by 0.903 km/s and V8 by
+0.336 km/s. The image path improved its wind-only prediction by 7.785 km/s, and
+the gate followed the intended arrival-time ordering. A complete 128 px CUDA
+run remains necessary.

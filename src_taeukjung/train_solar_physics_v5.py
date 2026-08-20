@@ -152,6 +152,8 @@ def run_epoch(
     sample_ids = []
     chain_ids_output = []
     chain_positions_output = []
+    diagnostic_sums = {}
+    diagnostic_sample_count = 0
 
     for batch_index, batch in enumerate(loader, start=1):
         images = batch["images"].to(DEVICE, non_blocking=PIN_MEMORY)
@@ -194,6 +196,15 @@ def run_epoch(
         fusion_residual_squared_sum += float(fusion_residual_km_s.square().sum().cpu())
         value_count += detached_error.numel()
 
+        if hasattr(model, "training_diagnostics"):
+            batch_diagnostics = model.training_diagnostics()
+            for name, value in batch_diagnostics.items():
+                scalar = float(torch.as_tensor(value).detach().float().cpu())
+                diagnostic_sums[name] = (
+                    diagnostic_sums.get(name, 0.0) + scalar * images.size(0)
+                )
+            diagnostic_sample_count += images.size(0)
+
         batch_chain_ids = batch["chain_id"].numpy()
         row_squared_error = detached_error.square().sum(dim=1).cpu().numpy()
         np.add.at(chain_squared_error_sum, batch_chain_ids, row_squared_error)
@@ -228,6 +239,11 @@ def run_epoch(
         "chain_macro_rmse": float(chain_rmse.mean()),
         "chain_rmse": chain_rmse,
     }
+    if diagnostic_sample_count > 0:
+        result["diagnostics"] = {
+            name: total / diagnostic_sample_count
+            for name, total in diagnostic_sums.items()
+        }
     if collect_predictions:
         result.update(
             {
@@ -447,15 +463,28 @@ def main(
                 ],
                 "learning_rate": learning_rate,
                 "seconds": elapsed,
+                **{
+                    f"train_{name}": value
+                    for name, value in train_metrics.get("diagnostics", {}).items()
+                },
+                **{
+                    f"val_{name}": value
+                    for name, value in val_metrics.get("diagnostics", {}).items()
+                },
             }
         )
         pd.DataFrame(history).to_csv(history_path, index=False)
+        diagnostic_text = "".join(
+            f" {name}={value:.3f}"
+            for name, value in val_metrics.get("diagnostics", {}).items()
+        )
         print(
             f"epoch={epoch:03d} train_rmse={train_metrics['rmse']:.3f} "
             f"val_rmse={val_metrics['rmse']:.3f} "
             f"val_chain_macro_rmse={val_metrics['chain_macro_rmse']:.3f} "
             f"wind_val_rmse={val_metrics['wind_rmse']:.3f} "
-            f"lr={learning_rate:.2e} seconds={elapsed:.1f}",
+            f"lr={learning_rate:.2e} seconds={elapsed:.1f}"
+            f"{diagnostic_text}",
             flush=True,
         )
 

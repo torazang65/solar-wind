@@ -394,3 +394,25 @@ bash scripts_taeukjung/run_solar_ballistic_v8_server_cuda.sh infer
 
 V8 defaults to 128 px and writes to
 `/home/jovyan/outputs/solar_ballistic_v8_taeukjung`.
+
+## Learned-arrival TCN v9
+
+V9 removes the full Transformer encoder. A CEA CNN and causal TCN encode the
+image sequence, a second causal TCN independently encodes wind, and a learned
+per-image transit/source gate builds one image context for each forecast
+horizon. This prevents same-index image/wind fusion and makes temporal routing
+directly inspectable.
+
+Server training, inference, and diagnostics:
+
+```bash
+bash scripts_taeukjung/run_solar_arrival_v9_server_cuda.sh train
+bash scripts_taeukjung/run_solar_arrival_v9_server_cuda.sh infer
+bash scripts_taeukjung/run_solar_arrival_v9_server_cuda.sh diagnose
+```
+
+The server defaults to 128 px, batch size 64, learning rate `2e-4`, a 2 by 4
+CEA grid, soft-cubic strength 0.25, and an isolated output directory at
+`/home/jovyan/outputs/solar_arrival_v9_taeukjung`. The local launcher requires
+the `ASAI` conda environment. Architecture and diagnostics are documented in
+`MODEL_V9_taeukjung.md`.
