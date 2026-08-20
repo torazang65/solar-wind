@@ -131,7 +131,7 @@ For a separate 128 px run:
 
 ```bash
 IMAGE_SIZE=128 \
-BATCH_SIZE=64 \
+BATCH_SIZE=32 \
 OUTPUT_DIR=/home/jovyan/outputs/baseline_v2_4_128_taeukjung \
 bash scripts_taeukjung/run_baseline_v2_4_server_cuda.sh train
 ```
