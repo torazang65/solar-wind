@@ -44,3 +44,50 @@ python scripts_taeukjung/run_preprocess_64_20epoch.py \
 ```
 
 Merge into `main` only after the branch result has been reviewed.
+
+## Compact Transformer
+
+The compact Transformer uses the same mask and soft-cubic preprocessing as
+`src_taeukjung`, then applies a temporal convolution, a two-layer encoder, and
+one cross-attention readout for the 12 forecast horizons.
+
+Local Apple MPS:
+
+```bash
+./scripts_taeukjung/run_transformer_local_mps.sh train
+./scripts_taeukjung/run_transformer_local_mps.sh infer
+```
+
+Competition server CUDA:
+
+```bash
+./scripts_taeukjung/run_transformer_server_cuda.sh train
+./scripts_taeukjung/run_transformer_server_cuda.sh infer
+```
+
+Train on the competition server:
+
+```bash
+DATA_ROOT=/home/jovyan/public_dataset/competition_dataset_6h \
+OUTPUT_DIR=/home/jovyan/outputs/transformer_taeukjung \
+IMAGE_SIZE=64 \
+EPOCHS=20 \
+BATCH_SIZE=256 \
+NUM_WORKERS=4 \
+SOLAR_DISK_MASK=1 \
+IMAGE_NORM=soft_cubic \
+SOFT_CUBIC_STRENGTH=0.25 \
+python src_taeukjung/train_transformer.py
+```
+
+Run validation evaluation and test inference with the same preprocessing:
+
+```bash
+DATA_ROOT=/home/jovyan/public_dataset/competition_dataset_6h \
+OUTPUT_DIR=/home/jovyan/outputs/transformer_taeukjung \
+IMAGE_SIZE=64 \
+SOLAR_DISK_MASK=1 \
+IMAGE_NORM=soft_cubic \
+SOFT_CUBIC_STRENGTH=0.25 \
+python src_taeukjung/inference_transformer.py
+```

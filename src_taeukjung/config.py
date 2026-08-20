@@ -20,6 +20,7 @@ if torch.cuda.is_available():
 DATA_ROOT = Path(os.getenv("DATA_ROOT", "public_dataset/competition_dataset_6h"))
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "outputs/baseline_6h"))
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+CACHE_DIR = Path(os.getenv("CACHE_DIR", str(OUTPUT_DIR / "resized_cache")))
 
 # ==========================================
 # 3. Hyperparameters
@@ -40,6 +41,15 @@ SPATIAL_FEATURE_SIZE = int(os.getenv("SPATIAL_FEATURE_SIZE", "4"))
 IMAGE_NORM = os.getenv("IMAGE_NORM", "soft_cubic")
 SOFT_CUBIC_STRENGTH = float(os.getenv("SOFT_CUBIC_STRENGTH", "0.25"))
 
+TRANSFORMER_KWARGS = {
+    "d_model": 128,
+    "wind_dim": 32,
+    "nhead": 8,
+    "encoder_layers": 2,
+    "ff_dim": 256,
+    "dropout": 0.1,
+}
+
 # ==========================================
 # 5. Device Setup
 # ==========================================
@@ -58,6 +68,8 @@ if hasattr(torch, "set_float32_matmul_precision"):
     torch.set_float32_matmul_precision("high")
 if DEVICE.type == "cuda":
     torch.backends.cudnn.benchmark = True
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
 elif DEVICE.type == "mps":
     print("INFO: Using Apple MPS")
 else:
@@ -69,5 +81,9 @@ elif IMAGE_SIZE >= 512 and DEVICE.type == "mps":
     BATCH_SIZE = 1
 elif IMAGE_SIZE >= 512:
     BATCH_SIZE = 8
+elif DEVICE.type == "mps":
+    BATCH_SIZE = 64
+elif DEVICE.type == "cpu":
+    BATCH_SIZE = 32
 else:
     BATCH_SIZE = 256

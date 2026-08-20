@@ -40,7 +40,7 @@ def normalize_images_uint8(images):
 
 def prepare_image_memmap(split, inputs):
     image_root = DATA_ROOT / split
-    cache_root = OUTPUT_DIR / "resized_cache" / f"{IMAGE_SIZE}px"
+    cache_root = CACHE_DIR / f"{IMAGE_SIZE}px"
     cache_root.mkdir(parents=True, exist_ok=True)
     array_path = cache_root / f"{split}_images.npy"
     metadata_path = cache_root / f"{split}_metadata.json"
