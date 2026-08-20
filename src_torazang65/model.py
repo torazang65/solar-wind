@@ -77,6 +77,7 @@ class SolarWindBaseline(nn.Module):
         image_size=64,
         use_images=True,
         time_mask_prob=0.15,
+        modality_drop_prob=0.25,
         nhead=8,
         num_encoder_layers=3,
         num_decoder_layers=2,
@@ -135,19 +136,10 @@ class SolarWindBaseline(nn.Module):
         self.image_encoder = nn.Sequential(*blocks)
 
         # The stem pool and the 3 block pools each halve the spatial
-        # dims, so the CNN output is image_size // 16 on a side:
-        #
-        #    64px -> (B, 128, 20, 4, 4) -> 2048 per timestep
-        #   128px -> (B, 128, 20, 8, 8) -> 8192 per timestep
-        #
-        # Derived rather than hard-coded so changing IMAGE_SIZE in
-        # config.py does not silently break the projection.
-        if image_size % 16 != 0:
-            raise ValueError(
-                f"image_size must be divisible by 16, got {image_size}"
-            )
-
-        spatial = image_size // 16
+        # dims (64px -> 4x4 grid), and forward() then collapses that
+        # grid with global average pooling, so the projection below is
+        # independent of image_size. The image_size argument is kept
+        # only so call sites stay unchanged.
 
         # Diagnostic switch. With use_images=False the CNN is skipped
         # and the image tokens are dropped entirely, so the encoder
@@ -170,14 +162,31 @@ class SolarWindBaseline(nn.Module):
         # on the same scale as an unmasked one.
         self.time_mask_prob = time_mask_prob
 
+        # Modality dropout: with this probability, per sample and per
+        # training forward pass, the entire image stream is zeroed.
+        # The model is thereby forced to keep a self-sufficient
+        # wind-only pathway and cannot lean exclusively on image
+        # tokens -- the pathway that carried the observed
+        # memorization. Complements the per-timestep masking above.
+        self.modality_drop_prob = modality_drop_prob
+
         # -> one image token per timestep
+        #
+        # The input is 128-dim because forward() global-average-pools
+        # the CNN's 4x4 spatial grid before this projection. The
+        # previous flatten+Linear(2048 -> d_model) preserved
+        # per-position features, which let the model fingerprint
+        # individual frames (each reused by ~20 overlapping windows)
+        # and memorize their targets -- that single layer held ~30%
+        # of all parameters. The trade-off is real: disk position of
+        # coronal features does matter physically (a central coronal
+        # hole is Earth-directed, a limb one is not), so if
+        # overfitting stops but the image contribution shrinks, a
+        # 2x2 pooled middle ground is the next thing to try.
         #
         # No LayerNorm here: normalization happens once per token,
         # after the positional/modality embeddings have been added.
-        self.image_projection = nn.Linear(
-            128 * spatial * spatial,
-            d_model,
-        )
+        self.image_projection = nn.Linear(128, d_model)
 
         # ============================================================
         # 2. Wind embedding
@@ -365,19 +374,14 @@ class SolarWindBaseline(nn.Module):
             #
             # (B, 128, 20, 4, 4)
 
-            # move time dimension:
+            # global average pool over the spatial grid, then move
+            # the time dimension:
             #
-            # (B, 20, 128, 4, 4)
-            image_features = image_features.permute(
-                0, 2, 1, 3, 4
-            ).contiguous()
+            # (B, 128, 20) -> (B, 20, 128)
+            image_features = image_features.mean(dim=(3, 4))
+            image_features = image_features.transpose(1, 2)
 
-            # flatten spatial/channel dimensions
-            #
-            # (B, 20, 2048)
-            image_features = image_features.flatten(2)
-
-            # (B,20,2048)
+            # (B,20,128)
             #       ↓
             # (B,20,d_model)
             image_tokens = self.image_projection(
@@ -397,6 +401,22 @@ class SolarWindBaseline(nn.Module):
                         device=image_tokens.device,
                     )
                     >= self.time_mask_prob
+                )
+                image_tokens = image_tokens * keep
+
+            # Modality dropout: (B,1,1) per-sample keep-mask zeroing
+            # all 20 image tokens at once. Unlike wind-only mode the
+            # token slots stay in the sequence, carrying only the
+            # time/modality embeddings. Training only.
+            if self.training and self.modality_drop_prob > 0:
+                keep = (
+                    torch.rand(
+                        image_tokens.size(0),
+                        1,
+                        1,
+                        device=image_tokens.device,
+                    )
+                    >= self.modality_drop_prob
                 )
                 image_tokens = image_tokens * keep
         else:
