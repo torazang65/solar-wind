@@ -24,7 +24,7 @@ if torch.cuda.is_available():
 DATA_ROOT = Path("public_dataset/competition_dataset_6h")
 # train.py가 시작 시 기존 best_model.pth를 지우므로, 런이 바뀔 때마다
 # 이름을 올려 이전 산출물을 보존한다.
-OUTPUT_DIR = Path(f"outputs/transformer_v5a_propagation_torazang65_seed{SEED}")
+OUTPUT_DIR = Path(f"outputs/transformer_v5c_corrdrop_torazang65_seed{SEED}")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 CACHE_DIR = Path("outputs/cache")
 
@@ -123,6 +123,11 @@ MODEL_KWARGS = dict(
     # wind-only 경로가 항상 자립하도록 강제해서 이미지 경로 암기를
     # 억제한다. 0이면 꺼짐. time_mask_prob와 함께 스윕 대상.
     modality_drop_prob=0.25,
+    # v5c: 학습 중 샘플 단위로 출력 조립의 correction 항을 drop하는
+    # 확률. v5a의 병목(correction 과적합, epoch-4 best)을 표적한다.
+    # 판정: val 바닥이 epoch 4보다 뒤로 밀리는지 + 그 시점의
+    # mechanism 성숙도(vstd/cov/hind). 고정 기본값, 스윕 금지.
+    correction_drop_prob=0.3,
     # stem 입력 채널. add_diff_channels=True면 원본 채널 수의 2배.
     # v3 이전으로 되돌리려면 (2, False)로.
     image_in_channels=4,

@@ -79,6 +79,7 @@ class SolarWindBaseline(nn.Module):
         use_images=True,
         time_mask_prob=0.15,
         modality_drop_prob=0.25,
+        correction_drop_prob=0.0,
         nhead=8,
         num_encoder_layers=3,
         num_decoder_layers=2,
@@ -188,6 +189,14 @@ class SolarWindBaseline(nn.Module):
         # tokens -- the pathway that carried the observed
         # memorization. Complements the per-timestep masking above.
         self.modality_drop_prob = modality_drop_prob
+
+        # v5c: correction dropout. 학습 중 샘플 단위로 출력 조립의
+        # correction 항을 0으로 만들어 base + 전파 branch가 자립하도록
+        # 강제한다. v5a의 병목이 correction(full transformer) 경로의
+        # 과적합(train 48 vs val 74, epoch-4 best -- 성숙한 전파
+        # branch가 체크포인트에 못 담김)이었고, 이미지 modality_drop과
+        # 같은 논리를 출력단에 적용한 것. Training only.
+        self.correction_drop_prob = correction_drop_prob
 
         # -> one image token per timestep
         #
@@ -785,6 +794,18 @@ class SolarWindBaseline(nn.Module):
 
         # (B,12,1) -> (B,12)
         correction = self.output_head(decoded).squeeze(-1)
+
+        # v5c correction dropout (constructor 참고). 1/(1-p) 재스케일은
+        # 일부러 안 한다: 유지된 샘플은 eval과 동일한 함수를 보므로
+        # head가 정확한 스케일을 배우고, drop된 샘플만 base+전파 단독
+        # 적합을 훈련한다 (기대값 보존 재스케일은 per-sample drop에선
+        # 오히려 eval 스케일을 어긋나게 한다).
+        if self.training and self.correction_drop_prob > 0:
+            correction_keep = (
+                torch.rand(batch_size, 1, device=correction.device)
+                >= self.correction_drop_prob
+            )
+            correction = correction * correction_keep
 
         # ============================================================
         # OUTPUT ASSEMBLY (section 6.6)
