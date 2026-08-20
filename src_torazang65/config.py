@@ -24,7 +24,7 @@ if torch.cuda.is_available():
 DATA_ROOT = Path("public_dataset/competition_dataset_6h")
 # train.py가 시작 시 기존 best_model.pth를 지우므로, 런이 바뀔 때마다
 # 이름을 올려 이전 산출물을 보존한다.
-OUTPUT_DIR = Path(f"outputs/transformer_v5b_surge_torazang65_seed{SEED}")
+OUTPUT_DIR = Path(f"outputs/transformer_v6a_prop_torazang65_seed{SEED}")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 CACHE_DIR = Path("outputs/cache")
 
@@ -118,6 +118,28 @@ PHYSICAL_LR_MULT = 100.0
 # vs climatology, source speed-실측 상관, beta_h 단조성, alpha_h 레짐
 # 분포) -- val RMSE는 노이즈에 묻혀도 이 지표들로 구조 작동 여부를
 # 1런에 판정할 수 있다.
+# v6a (prop-only): correction 경로(transformer encoder/decoder/output
+# head + wind 토큰화) 완전 제거 -- 이것 하나만 바꾸는 단일 변수 실험.
+# 근거 (v5b branch decomposition, seed 777):
+#   - base+prop 67.27 < full 69.23. corr own-gain은 quiet +4.0(유의)
+#     / surge -3.3(유의)이고, full은 surge에서 base+prop 대비 -7~-9.
+#   - decoder attention COM이 horizon/속도군 무관 ~55h 고정: 정렬된
+#     읽기가 아니라 train 패턴 bag-of-frames 지름길.
+#   - correction_drop 0.3에도 epoch-6 조기 best. 그동안 val hindcast
+#     는 epoch 13+까지 계속 개선 -- 전파 branch 성숙이 체크포인트에
+#     못 담기는 병목의 주범이 correction 과적합.
+# correction_drop=0.3 덕에 학습의 30%는 이미 base+prop 단독 적합을
+# 훈련했으므로 67.27은 재학습 기대치의 합리적 추정이다. 판정
+# (seed 3개 평균: 777/1234/2024, 그룹 delta 단독 판정 금지):
+#   (1) val <= 67.5: ablation 67.27 재현. 미달이면 correction이 학습
+#       중 정규화로 일했다는 뜻 -- 그 자체가 정보.
+#   (2) best epoch > 10: 조기 종결 해소, hindcast 성숙이 담기는지.
+#   (3) surge에서 v5b full 대비 -7~-9 회수 + slow-quiet align 비음수
+#       유지 (branch_decomposition으로 확인).
+#   (4) quiet 열화 폭 = correction의 +4.0 중 잔존분. 크면 다음 수는
+#       correction 재도입이 아니라 base의 AR(2) 강화다 (correction의
+#       quiet 기여 실체는 wind 단기 자기상관 표현으로 추정 --
+#       taeukjung 브랜치에서 AR(2) 검증됨).
 MODEL_KWARGS = dict(
     d_model=128,
     nhead=8,
@@ -132,11 +154,10 @@ MODEL_KWARGS = dict(
     # wind-only 경로가 항상 자립하도록 강제해서 이미지 경로 암기를
     # 억제한다. 0이면 꺼짐. time_mask_prob와 함께 스윕 대상.
     modality_drop_prob=0.25,
-    # v5c: 학습 중 샘플 단위로 출력 조립의 correction 항을 drop하는
-    # 확률. v5a의 병목(correction 과적합, epoch-4 best)을 표적한다.
-    # 판정: val 바닥이 epoch 4보다 뒤로 밀리는지 + 그 시점의
-    # mechanism 성숙도(vstd/cov/hind). 고정 기본값, 스윕 금지.
-    correction_drop_prob=0.3,
+    # v6a: correction 경로 완전 제거 (섹션 3.5 주석). True로 되돌리면
+    # v5b 구조 (그때는 correction_drop_prob=0.3도 함께 복원할 것 --
+    # 경로가 없으면 무의미해서 뺐다).
+    use_correction=False,
     # v5b: 이미지 전용 surge head + 그 확률을 fusion gate에 연결.
     # v5a 분해의 결함 지도(slow-quiet align -10.6, gate 레짐 무차별)
     # 를 표적한다. False면 v5c 구조와 동일 (구 체크포인트 분석 시

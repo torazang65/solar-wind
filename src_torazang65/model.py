@@ -80,6 +80,7 @@ class SolarWindBaseline(nn.Module):
         time_mask_prob=0.15,
         modality_drop_prob=0.25,
         correction_drop_prob=0.0,
+        use_correction=True,
         use_surge_head=False,
         nhead=8,
         num_encoder_layers=3,
@@ -199,6 +200,22 @@ class SolarWindBaseline(nn.Module):
         # 같은 논리를 출력단에 적용한 것. Training only.
         self.correction_drop_prob = correction_drop_prob
 
+        # v6a: correction 경로 스위치. v5b branch decomposition에서
+        # base+prop(67.3) < full(69.2): corr own-gain은 quiet +4.0,
+        # surge -3.3(유의)이고 full은 surge에서 base+prop 대비 -7~-9를
+        # 잃는다. decoder attention COM은 horizon/속도군 무관 ~55h
+        # 고정(정렬된 읽기를 안 함)이며, correction_drop 0.3으로도
+        # epoch-6 조기 best를 못 막았다 (val hindcast는 epoch 13+까지
+        # 개선 -- 전파 branch 성숙이 체크포인트에 못 담김).
+        #
+        # False면 transformer encoder/decoder/output head와 wind
+        # 토큰화를 아예 만들지 않는다. 출력은
+        #   base + alpha*(v_img - base) = (1-a)*B + a*S
+        # 의 2-expert convex mixture만 남고, 과거 wind는 base와 gate
+        # 요약으로만, EUV는 propagation readout으로만 미래에
+        # 기여한다 (EUV -> 미래의 유일 경로가 arrival-conditioned).
+        self.use_correction = use_correction
+
         # -> one image token per timestep
         #
         # 2x4 (lat x lon) pooled middle ground between two extremes:
@@ -253,7 +270,10 @@ class SolarWindBaseline(nn.Module):
         # (B, 20, d_model)
         # ============================================================
 
-        self.wind_projection = nn.Linear(1, d_model)
+        # v6a: wind 토큰은 encoder 입력에만 쓰이므로 correction 경로와
+        # 함께 생긴다 (base/gate는 wind 원시 시퀀스를 직접 읽는다).
+        if use_correction:
+            self.wind_projection = nn.Linear(1, d_model)
 
         # ============================================================
         # 3. Positional + modality embeddings, token normalization
@@ -275,39 +295,44 @@ class SolarWindBaseline(nn.Module):
         # still below the content scale.
         # ============================================================
 
-        self.pos_embedding = nn.Parameter(
-            torch.randn(1, 20, d_model) * pos_embedding_std
-        )
+        # v6a: 시간/모달리티 embedding과 token_norm도 encoder 전용이다.
+        # propagation readout(6.5)과 fusion 요약은 embedding이 더해지기
+        # 전의 content 토큰에서 계산하므로 영향이 없다.
+        if use_correction:
+            self.pos_embedding = nn.Parameter(
+                torch.randn(1, 20, d_model) * pos_embedding_std
+            )
 
-        self.image_modality = nn.Parameter(
-            torch.randn(1, 1, d_model) * pos_embedding_std
-        )
+            self.image_modality = nn.Parameter(
+                torch.randn(1, 1, d_model) * pos_embedding_std
+            )
 
-        self.wind_modality = nn.Parameter(
-            torch.randn(1, 1, d_model) * pos_embedding_std
-        )
+            self.wind_modality = nn.Parameter(
+                torch.randn(1, 1, d_model) * pos_embedding_std
+            )
 
-        self.token_norm = nn.LayerNorm(d_model)
+            self.token_norm = nn.LayerNorm(d_model)
 
         # ============================================================
         # 4. Multimodal Transformer Encoder
         # ============================================================
 
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=d_model,
-            nhead=nhead,
-            dim_feedforward=dim_feedforward,
-            dropout=dropout,
-            activation="gelu",
-            batch_first=True,
-            norm_first=True,
-        )
+        if use_correction:
+            encoder_layer = nn.TransformerEncoderLayer(
+                d_model=d_model,
+                nhead=nhead,
+                dim_feedforward=dim_feedforward,
+                dropout=dropout,
+                activation="gelu",
+                batch_first=True,
+                norm_first=True,
+            )
 
-        self.transformer_encoder = nn.TransformerEncoder(
-            encoder_layer,
-            num_layers=num_encoder_layers,
-            norm=nn.LayerNorm(d_model),
-        )
+            self.transformer_encoder = nn.TransformerEncoder(
+                encoder_layer,
+                num_layers=num_encoder_layers,
+                norm=nn.LayerNorm(d_model),
+            )
 
         # ============================================================
         # 5. 12 future query tokens
@@ -326,29 +351,31 @@ class SolarWindBaseline(nn.Module):
         # is the first thing applied to them.
         # ============================================================
 
-        self.future_queries = nn.Parameter(
-            torch.randn(1, 12, d_model) * 0.02
-        )
+        if use_correction:
+            self.future_queries = nn.Parameter(
+                torch.randn(1, 12, d_model) * 0.02
+            )
 
         # ============================================================
         # 6. Transformer Decoder
         # ============================================================
 
-        decoder_layer = nn.TransformerDecoderLayer(
-            d_model=d_model,
-            nhead=nhead,
-            dim_feedforward=dim_feedforward,
-            dropout=dropout,
-            activation="gelu",
-            batch_first=True,
-            norm_first=True,
-        )
+        if use_correction:
+            decoder_layer = nn.TransformerDecoderLayer(
+                d_model=d_model,
+                nhead=nhead,
+                dim_feedforward=dim_feedforward,
+                dropout=dropout,
+                activation="gelu",
+                batch_first=True,
+                norm_first=True,
+            )
 
-        self.transformer_decoder = nn.TransformerDecoder(
-            decoder_layer,
-            num_layers=num_decoder_layers,
-            norm=nn.LayerNorm(d_model),
-        )
+            self.transformer_decoder = nn.TransformerDecoder(
+                decoder_layer,
+                num_layers=num_decoder_layers,
+                norm=nn.LayerNorm(d_model),
+            )
 
         # ============================================================
         # 6.5 Propagation readout (learned-ESWF layer) -- v5a
@@ -522,20 +549,22 @@ class SolarWindBaseline(nn.Module):
         # (d_model) -> one solar wind value
         # ============================================================
 
-        self.output_head = nn.Sequential(
-            nn.Linear(d_model, d_model // 2),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(d_model // 2, 1),
-        )
+        if use_correction:
+            self.output_head = nn.Sequential(
+                nn.Linear(d_model, d_model // 2),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(d_model // 2, 1),
+            )
 
-        # Zero-init the last layer so the head starts at exactly zero.
-        # Combined with the persistence residual in forward(), the
-        # model starts as pure persistence and learns only the
-        # correction on top of it. Without this the initial prediction
-        # is wind[-1] plus a random offset of roughly +-200 km/s.
-        nn.init.zeros_(self.output_head[-1].weight)
-        nn.init.zeros_(self.output_head[-1].bias)
+            # Zero-init the last layer so the head starts at exactly
+            # zero. Combined with the persistence residual in
+            # forward(), the model starts as pure persistence and
+            # learns only the correction on top of it. Without this
+            # the initial prediction is wind[-1] plus a random offset
+            # of roughly +-200 km/s.
+            nn.init.zeros_(self.output_head[-1].weight)
+            nn.init.zeros_(self.output_head[-1].bias)
 
     def forward(self, images, wind, return_aux=False):
         # return_aux=True면 (prediction, aux dict)를 반환한다. aux는
@@ -553,15 +582,10 @@ class SolarWindBaseline(nn.Module):
         last_wind = wind_seq[:, -1:]
 
         # ============================================================
-        # WIND TOKENS
-        # ============================================================
-
-        # (B,20) -> (B,20,1) -> (B,20,d_model)
-        wind_tokens = self.wind_projection(wind_seq.unsqueeze(-1))
-
-        # ============================================================
         # IMAGE TOKENS
         # ============================================================
+        # (v6a: wind 토큰화는 encoder 전용이라 CORRECTION PATH 블록
+        #  안으로 이동했다. base/gate는 wind_seq를 직접 읽는다.)
 
         if self.use_images:
             # dataset:
@@ -755,118 +779,110 @@ class SolarWindBaseline(nn.Module):
             self.last_source_gate = None
 
         # ============================================================
-        # MULTIMODAL SEQUENCE
+        # CORRECTION PATH: encoder + decoder + head (v6a: 통째 제거)
         # ============================================================
-        # Two parallel token streams over the same 20 timestamps:
-        #
-        # [
-        #   image_t0, ..., image_t19,
-        #   wind_t0,  ..., wind_t19,
-        # ]
-        #
-        # Same-index image and wind share a time embedding but stay
-        # separate tokens: wind_t left the Sun days before image_t
-        # was taken, so fusing them would assert a causal alignment
-        # that does not exist (see section 2 in __init__). Attention
-        # is free to match wind to the earlier images instead.
-        #
-        # shape:
-        #
-        # (B, 40, d_model) -- (B, 20, d_model) in wind-only mode
+        # use_correction=False면 이 블록 전체가 빠지고 correction=0.
+        # 남는 출력 경로는 base + alpha*(v_img - base)뿐이다 --
+        # 근거와 판정 기준은 constructor의 use_correction 주석.
         # ============================================================
+        if self.use_correction:
+            # ========================================================
+            # WIND TOKENS + MULTIMODAL SEQUENCE
+            # ========================================================
+            # Two parallel token streams over the same 20 timestamps:
+            #
+            # [
+            #   image_t0, ..., image_t19,
+            #   wind_t0,  ..., wind_t19,
+            # ]
+            #
+            # Same-index image and wind share a time embedding but
+            # stay separate tokens: wind_t left the Sun days before
+            # image_t was taken, so fusing them would assert a causal
+            # alignment that does not exist (see section 2 in
+            # __init__). Attention is free to match wind to the
+            # earlier images instead.
+            #
+            # shape:
+            #
+            # (B, 40, d_model) -- (B, 20, d_model) in wind-only mode
+            # ========================================================
 
-        wind_tokens = (
-            wind_tokens + self.pos_embedding + self.wind_modality
-        )
+            # (B,20) -> (B,20,1) -> (B,20,d_model)
+            wind_tokens = self.wind_projection(wind_seq.unsqueeze(-1))
+            wind_tokens = (
+                wind_tokens + self.pos_embedding + self.wind_modality
+            )
 
-        if image_tokens is not None:
-            image_tokens = (
-                image_tokens
-                + self.pos_embedding
-                + self.image_modality
+            if image_tokens is not None:
+                # content 토큰(image_tokens)은 건드리지 않는다 --
+                # 아래 output assembly의 None 체크에 그대로 쓰인다.
+                encoder_image_tokens = (
+                    image_tokens
+                    + self.pos_embedding
+                    + self.image_modality
+                )
+                multimodal_tokens = torch.cat(
+                    [encoder_image_tokens, wind_tokens],
+                    dim=1,
+                )
+            else:
+                multimodal_tokens = wind_tokens
+
+            multimodal_tokens = self.token_norm(multimodal_tokens)
+
+            # ========================================================
+            # ENCODER
+            # ========================================================
+            # Every token can attend to every other token, across
+            # both modalities and all timesteps.
+            # memory:
+            # (B,40,d_model)
+            # ========================================================
+
+            memory = self.transformer_encoder(multimodal_tokens)
+
+            # ========================================================
+            # FUTURE QUERIES + DECODER
+            # ========================================================
+            # query +6h..+72h가 encoder memory를 읽는다. 12개 동시
+            # 예측 -- autoregressive loop/teacher forcing 없음.
+            #
+            # v5a: cross-attention에는 더 이상 temporal prior bias가
+            # 없다. 시간 정렬은 section 6.5의 propagation branch가
+            # 출력 경로에서 직접 담당하고, 이 decoder는 그 위의
+            # 자유형 correction만 만든다.
+            # ========================================================
+
+            queries = self.future_queries.expand(batch_size, -1, -1)
+
+            decoded = self.transformer_decoder(
+                tgt=queries,
+                memory=memory,
             )
-            multimodal_tokens = torch.cat(
-                [image_tokens, wind_tokens],
-                dim=1,
-            )
+
+            # (B,12,d_model) -> (B,12,1) -> (B,12)
+            correction = self.output_head(decoded).squeeze(-1)
+
+            # v5c correction dropout (constructor 참고). 1/(1-p)
+            # 재스케일은 일부러 안 한다: 유지된 샘플은 eval과 동일한
+            # 함수를 보므로 head가 정확한 스케일을 배우고, drop된
+            # 샘플만 base+전파 단독 적합을 훈련한다 (기대값 보존
+            # 재스케일은 per-sample drop에선 오히려 eval 스케일을
+            # 어긋나게 한다).
+            if self.training and self.correction_drop_prob > 0:
+                correction_keep = (
+                    torch.rand(
+                        batch_size, 1, device=correction.device
+                    )
+                    >= self.correction_drop_prob
+                )
+                correction = correction * correction_keep
         else:
-            multimodal_tokens = wind_tokens
-
-        multimodal_tokens = self.token_norm(multimodal_tokens)
-
-        # ============================================================
-        # ENCODER
-        # ============================================================
-        # Every token can attend to every other token, across both
-        # modalities and all timesteps.
-        # memory:
-        # (B,40,d_model)
-        # ============================================================
-
-        memory = self.transformer_encoder(
-            multimodal_tokens
-        )
-
-        # ============================================================
-        # FUTURE QUERIES
-        # ============================================================
-        #
-        # (1,12,d_model)
-        #       ↓
-        # (B,12,d_model)
-        # ============================================================
-
-        queries = self.future_queries.expand(
-            batch_size,
-            -1,
-            -1,
-        )
-
-        # ============================================================
-        # DECODER
-        # ============================================================
-        # query +6h  -> attends encoder memory
-        # query +12h -> attends encoder memory
-        # ...
-        # query +72h -> attends encoder memory
-        #
-        # All 12 are predicted simultaneously.
-        # NO autoregressive loop.
-        # NO teacher forcing.
-        #
-        # v5a: cross-attention에는 더 이상 temporal prior bias가
-        # 없다. 시간 정렬은 section 6.5의 propagation branch가 출력
-        # 경로에서 직접 담당하고, 이 decoder는 그 위의 자유형
-        # correction만 만든다.
-        # ============================================================
-
-        decoded = self.transformer_decoder(
-            tgt=queries,
-            memory=memory,
-        )
-
-        # decoded:
-        #
-        # (B,12,d_model)
-
-        # ============================================================
-        # OUTPUT
-        # ============================================================
-
-        # (B,12,1) -> (B,12)
-        correction = self.output_head(decoded).squeeze(-1)
-
-        # v5c correction dropout (constructor 참고). 1/(1-p) 재스케일은
-        # 일부러 안 한다: 유지된 샘플은 eval과 동일한 함수를 보므로
-        # head가 정확한 스케일을 배우고, drop된 샘플만 base+전파 단독
-        # 적합을 훈련한다 (기대값 보존 재스케일은 per-sample drop에선
-        # 오히려 eval 스케일을 어긋나게 한다).
-        if self.training and self.correction_drop_prob > 0:
-            correction_keep = (
-                torch.rand(batch_size, 1, device=correction.device)
-                >= self.correction_drop_prob
-            )
-            correction = correction * correction_keep
+            # v6a: correction 없음. 0 텐서로 두면 output assembly와
+            # 분석 스크립트(branch_decomposition의 재조립 검증)가
+            # 수정 없이 성립한다 (base+corr = base, full = base+prop).
+            correction = wind_seq.new_zeros(batch_size, 12)
 
         # ============================================================
         # OUTPUT ASSEMBLY (section 6.6)
