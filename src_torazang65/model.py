@@ -85,6 +85,7 @@ class SolarWindBaseline(nn.Module):
         dim_feedforward=512,
         dropout=0.1,
         pos_embedding_std=0.5,
+        image_in_channels=2,
     ):
         super().__init__()
 
@@ -92,17 +93,23 @@ class SolarWindBaseline(nn.Module):
         # 1. Image feature extractor
         # ============================================================
         # input:
-        #   images: (B, 20, 2, 64, 64)
+        #   images: (B, 20, C_in, 64, 64)
+        #
+        # C_in=4 (v4): 2 EUV band + 2 running-difference 채널. 아래의
+        # 모든 conv는 시간 커널이 1이라 프레임 간 픽셀 차분을 이
+        # 네트워크가 스스로 계산할 수 없다 -- CME의 on-disk 신호
+        # (dimming/플레어 증광)는 dataset.py가 Δ 채널로 공급한다.
+        # image_in_channels=2면 이전(원본 채널만) 구조와 동일.
         #
         # Conv3D input:
-        #   (B, 2, 20, 64, 64)
+        #   (B, C_in, 20, 64, 64)
         #
         # Temporal dimension 20 is NOT reduced.
         # ============================================================
 
         self.stem = nn.Sequential(
             conv_block(
-                2,
+                image_in_channels,
                 32,
                 (1, 5, 5),
                 padding=(0, 2, 2),
@@ -455,11 +462,11 @@ class SolarWindBaseline(nn.Module):
             # dataset:
             #
             # images:
-            # (B, T=20, C=2, H=64, W=64)
+            # (B, T=20, C_in, H=64, W=64)
             #
             # Conv3D wants:
             #
-            # (B, C=2, T=20, H=64, W=64)
+            # (B, C_in, T=20, H=64, W=64)
             image_features = images.permute(
                 0, 2, 1, 3, 4
             ).contiguous()
