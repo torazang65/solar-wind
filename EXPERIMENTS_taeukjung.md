@@ -1,5 +1,15 @@
 # Taeuk architecture experiments
 
+## V10: Seokho V5b anchored hybrid
+
+- Base: `src_torazang65/model.py` V5b
+- Wind anchor: global AR(2) fitted on reconstructed temporal chains
+- Image input: masked 193/211 plus signed running differences with gain 4
+- Timing: global 96-hour anchor with a learned speed-dependent residual
+- Output: bounded wind, propagation, and Transformer residuals
+- Validation: micro RMSE, chain-macro RMSE, and component ablations
+- Entrypoint: `scripts_taeukjung/run_solar_hybrid_v10_server_cuda.sh`
+
 ## Baseline kernel structure
 
 The shared baseline applies one `Conv3d` with kernel `(1, 5, 5)`, followed by

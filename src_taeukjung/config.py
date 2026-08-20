@@ -7,7 +7,7 @@ import torch
 # ==========================================
 # 1. Seed Setup
 # ==========================================
-SEED = 777
+SEED = int(os.getenv("SEED", "777"))
 random.seed(SEED)
 np.random.seed(SEED)
 torch.manual_seed(SEED)

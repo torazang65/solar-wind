@@ -2,6 +2,14 @@
 
 This branch keeps Taeuk's implementation separate from the shared baseline.
 
+## Solar Hybrid V10
+
+V10 starts from Seokho's V5b Inception3D, separated image/wind Transformer,
+ballistic hindcast, and surge head. It adds a temporal-chain AR(2) anchor,
+soft disk masking, amplified signed differences, a fixed 96-hour propagation
+scale, and horizon-wise bounded residuals. See
+`MODEL_SOLAR_HYBRID_V10_taeukjung.md` for the architecture and commands.
+
 ## Layout
 
 - `src/`: shared baseline
