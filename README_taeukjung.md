@@ -208,3 +208,65 @@ The rectangular token grid can be overridden without editing code:
 SOLAR_V2_SPATIAL_HEIGHT=4 SOLAR_V2_SPATIAL_WIDTH=8 \
   bash scripts_taeukjung/run_solar_probabilistic_v2_server_cuda.sh train
 ```
+
+## Solar geometry Transformer v3
+
+V3 is the RMSE-focused successor to the probabilistic models. V1 and V2 remain
+available for reproducibility. The main changes are:
+
+- the black-background mask radius (`0.49`) is independent of the approximate
+  CEA surface radius (`0.42`);
+- the default image mapping is linear instead of soft cubic;
+- the darkness channel is a center-weighted relative intensity deficit, so
+  masked or interpolated zeros cannot become maximum-strength dark features;
+- each latitude band jointly attends over all 20 timestamps and 8 longitude
+  cells, allowing longitudinal solar rotation to be modeled before forecast
+  queries read the 640 encoded tokens;
+- the Student-t distribution and auxiliary NLL are removed. Training minimizes
+  MSE in `(km/s)^2`, which has exactly the same optimum as the competition RMSE;
+- visual channel dropout, Transformer dropout, AdamW weight decay, gradient
+  clipping, validation-RMSE scheduling, and early stopping remain active.
+
+Competition server CUDA:
+
+```bash
+git switch taeukjung
+git pull --ff-only origin taeukjung
+bash scripts_taeukjung/run_solar_geometry_v3_server_cuda.sh train
+```
+
+Inference uses the best validation checkpoint and writes both the validation
+metrics and submission CSV:
+
+```bash
+bash scripts_taeukjung/run_solar_geometry_v3_server_cuda.sh infer
+```
+
+The server defaults to 128 px, batch size 64, 30 maximum epochs, learning rate
+`1e-4`, a 4 by 8 spatial grid, CEA radius `0.42`, and linear normalization. It
+writes to `/home/jovyan/outputs/solar_geometry_v3_taeukjung`, separate from all
+earlier versions. Long runs can be started with:
+
+```bash
+mkdir -p /home/jovyan/logs
+LOG="/home/jovyan/logs/solar_v3_$(date +%Y%m%d_%H%M%S).log"
+nohup bash scripts_taeukjung/run_solar_geometry_v3_server_cuda.sh train \
+  > "$LOG" 2>&1 &
+echo "PID=$! LOG=$LOG"
+tail -f "$LOG"
+```
+
+Local Apple MPS:
+
+```bash
+bash scripts_taeukjung/run_solar_geometry_v3_local_mps.sh train
+bash scripts_taeukjung/run_solar_geometry_v3_local_mps.sh infer
+```
+
+The geometry and memory settings can be overridden without editing code:
+
+```bash
+SOLAR_CEA_RADIUS_FRACTION=0.42 \
+SOLAR_V3_SPATIAL_HEIGHT=4 SOLAR_V3_SPATIAL_WIDTH=8 \
+  bash scripts_taeukjung/run_solar_geometry_v3_server_cuda.sh train
+```

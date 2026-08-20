@@ -37,6 +37,7 @@ NUM_WORKERS = int(os.getenv("NUM_WORKERS", "4"))
 SOLAR_DISK_MASK = os.getenv("SOLAR_DISK_MASK", "1").lower() not in {"0", "false", "no"}
 SOLAR_DISK_CENTER_FRACTION = (0.5, 0.5)  # (y, x)
 SOLAR_DISK_RADIUS_FRACTION = float(os.getenv("SOLAR_DISK_RADIUS_FRACTION", "0.49"))
+SOLAR_CEA_RADIUS_FRACTION = float(os.getenv("SOLAR_CEA_RADIUS_FRACTION", "0.42"))
 SPATIAL_FEATURE_SIZE = int(os.getenv("SPATIAL_FEATURE_SIZE", "4"))
 IMAGE_NORM = os.getenv("IMAGE_NORM", "soft_cubic")
 SOFT_CUBIC_STRENGTH = float(os.getenv("SOFT_CUBIC_STRENGTH", "0.25"))

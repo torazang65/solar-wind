@@ -30,8 +30,10 @@ def channel_norm(channels):
 class ObserverAlignedCEA(nn.Module):
     """Approximate equal-area reprojection for centered, north-up disk PNGs."""
 
-    def __init__(self, image_size, radius_fraction):
+    def __init__(self, image_size, radius_fraction, mask_radius_fraction=None):
         super().__init__()
+        if mask_radius_fraction is None:
+            mask_radius_fraction = radius_fraction
         longitude_margin = math.pi / (2.0 * image_size)
         longitude = torch.linspace(
             -math.pi / 2.0 + longitude_margin,
@@ -71,7 +73,7 @@ class ObserverAlignedCEA(nn.Module):
         self.register_buffer(
             "disk_mask",
             make_solar_disk_mask(
-                image_size, image_size, (0.5, 0.5), radius_fraction
+                image_size, image_size, (0.5, 0.5), mask_radius_fraction
             ),
             persistent=False,
         )

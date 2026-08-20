@@ -86,3 +86,46 @@ the same squared error in km/s units and clip the global gradient norm to 1.0.
 On a fixed synthetic image/wind batch, the CEA probabilistic model reduced RMSE
 from 12.64 to 1.46 km/s, confirming that image, attention, and distribution
 paths all train.
+
+## V3 geometry and objective corrections
+
+V3 was created after inspecting the exact 128 px preprocessing output on real
+193 A and 211 A images. It is a separate implementation; V1 and V2 are retained
+unchanged for comparison.
+
+The configured `0.49` disk radius is close to the image edge and is useful for
+removing the square black background. A radial profile over 64 training images,
+however, places the median EUV limb-brightening peak near `0.393`. V1 and V2
+used `0.49` for both masking and CEA sampling, so off-limb corona and near-edge
+background were stretched into the projected surface. V3 keeps the mask radius
+at `0.49` and uses an independently configurable CEA radius of `0.42`.
+
+V2 defined darkness as `1 - intensity`. Near low-`mu` CEA boundaries, masked
+and interpolated values near zero therefore became maximum-strength darkness.
+On the inspected sample, mean low-`mu` darkness was 0.937 and 0.839 for the two
+channels. V3 instead computes the positive channel-wise deficit below a
+`mu`-weighted disk reference, normalizes it by that reference, and multiplies
+it by `sqrt(mu)`. The same low-`mu` diagnostic falls to 0.009 with no values
+above 0.8.
+
+V1 and V2 sent only the spatial mean of every frame through their temporal
+encoder. V3 reshapes the 4 by 8 CEA grid into four latitude-band sequences. Each
+sequence jointly attends over `20 timestamps * 8 longitude cells`, allowing a
+feature to interact with neighboring longitudes as the Sun rotates. Forecast
+queries then attend to all 640 contextualized tokens.
+
+Finally, V3 removes the Student-t distribution heads and auxiliary NLL. Its
+only optimization objective is MSE in `(km/s)^2`; this has exactly the same
+minimizer as the competition RMSE. The server launcher also changes the default
+image mapping from soft cubic to linear. CUDA validation performance is pending
+and must be recorded before V3 replaces the best V1 checkpoint.
+
+Local implementation checks:
+
+- 128 px MPS forward and backward completed with finite gradients;
+- image token shape `(1, 20, 32, 72)`, encoded memory `(1, 640, 96)`, output
+  `(1, 12)`;
+- 199,033 model parameters;
+- actual cached dataset batch forward and backward completed;
+- checkpoint strict reload reproduced outputs exactly;
+- the optional mask-radius API preserved the original V2 mask and forward path.
