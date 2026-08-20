@@ -169,6 +169,14 @@ class SolarWindBaseline(nn.Module):
         # checkpoints stay compatible between the two modes.
         self.use_images = use_images
 
+        # v7 분석용 스위치: True면 eval에서도 modality drop과 동일하게
+        # 이미지 스트림(토큰 + readout cell feature)을 통째로 0으로
+        # 만든다. analysis.py의 wind-only ablation이 학습 분포 안의
+        # 조건(그냥 modality drop)과 정확히 일치하게 하는 장치 --
+        # 구 speed_ablation.py의 image_projection hook은 v7에서
+        # projection을 우회하는 readout 경로를 못 껐다.
+        self.force_image_drop = False
+
         # Temporal masking augmentation (SpecAugment style). During
         # training each timestep's image token is zeroed independently
         # with this probability, so the model cannot lean on any single
@@ -378,7 +386,7 @@ class SolarWindBaseline(nn.Module):
             )
 
         # ============================================================
-        # 6.5 Propagation readout (learned-ESWF layer) -- v5a
+        # 6.5 Propagation readout -- v5a: learned-ESWF, v7: source-map
         # ============================================================
         # v2/v3의 dynamic temporal prior(cross-attention logit bias)를
         # 대체한다. 실패 원인 진단: (1) prior가 출력 경로 밖의
@@ -421,6 +429,35 @@ class SolarWindBaseline(nn.Module):
         #   흐르므로(v2 gate와 달리 사멸 지점이 없다) 시작점만 현재
         #   구조와 맞춘다. speed bias -0.96 -> s=0.43=climatology,
         #   나머지 zero-init -> 순수 ballistic, 균일 p.
+        #
+        # v7 (source-map readout): 소스 단위를 프레임(20)에서
+        # 프레임 x 디스크 cell(20 x 2lat x 4lon = 160)로 분해하고,
+        # 자전 기하를 도착 시각 공식에 박는다.
+        #
+        #   arrival_{t,c} = -lon_{t,c}/omega + D_eff/s_{t,c}
+        #                   + 24h*tanh(.) - age_t
+        #
+        #   -lon/omega : cell 경도(음수=동쪽)가 CM(지구 방향)까지
+        #                자전해 오는 시간. 표준 ballistic backmapping
+        #                (출발 시점 소스는 CM 근방)의 순방향이다.
+        #   D_eff/s    : CM 출발 후 radial 통과시간 (v5a와 동일).
+        #
+        # 근거 (v6b 진단): 프레임당 소스 1개는 "이 프레임 어딘가"까지만
+        # 표현해 시간 정렬이 속도 무관 고정 템플릿(COM 속도군 분화 7h
+        # vs 이론 30h)으로 퇴화했다. 경도는 도착 시각의 지배 변수다
+        # (자전 0.55도/h -> 인접 column 45도 = ~82h, horizon 전체보다
+        # 크다). 같은 프레임의 east-limb CH와 CM CH가 다른 arrival을
+        # 갖게 되므로 "east는 아직, CM은 곧"이 자유 학습이 아니라
+        # 공식이 된다.
+        #
+        # head는 cell 공유 Linear (입력 = CNN cell feature 128 + 좌표
+        # 2). 공유가 정규화의 핵심: CH는 어디 있든 같은 head가 같은
+        # s/p를 뽑고 위치는 공식의 lon만 바꾼다. 좌표 입력은 공유
+        # head가 반구/limb 감쇠 같은 위치 의존 gate를 배울 통로다
+        # (per-cell 상수 입력이지만 head가 공유라 bias로 흡수되지
+        # 않는다 -- flatten+Linear의 per-cell weight와 다른 지점).
+        # delta-lon head(tanh * 22.5도)는 45도 column granularity를
+        # 연속 경도로 보정한다 (자전 환산 +-41h -> 연속).
         # ============================================================
 
         self.register_buffer(
@@ -431,16 +468,35 @@ class SolarWindBaseline(nn.Module):
             "horizon_hours",
             torch.arange(1, 13, dtype=torch.float32) * 6.0,
         )
-        # hindcast 재구성 격자. -72h 이전은 어떤 (age<=114h, tau) 조합
-        # 으로도 사실상 도달 불가라 c만 훈련시키므로 제외.
+        # hindcast 재구성 격자. (v7: 자전 대기 항 덕에 west 소스가
+        # 깊은 과거도 커버할 수 있지만 격자는 그대로 둔다 -- wind
+        # 입력 창과의 대응이 단순하고 v6와 비교 가능하게.)
         self.register_buffer(
             "hindcast_hours",
             torch.arange(-12, 1, dtype=torch.float32) * 6.0,
         )
 
-        self.source_speed_head = nn.Linear(d_model, 1)
-        self.source_gate_head = nn.Linear(d_model, 1)
-        self.transit_residual_head = nn.Linear(d_model, 1)
+        # v7 좌표/기하 상수. 경도 column 중심(도, 음수=동쪽): 가시
+        # 원반 [-90,+90]을 spatial_pool의 4 column이 균등 분할한다고
+        # 근사. 위도 row는 기하식에 안 들어가고 head 좌표 입력 전용
+        # (북/남 반구 구분). omega는 synodic 자전율(27.2753d) -- 고정
+        # 상수, 튜닝 노브를 늘리지 않는다.
+        self.register_buffer(
+            "cell_lon_deg",
+            torch.tensor([-67.5, -22.5, 22.5, 67.5]),
+        )
+        self.register_buffer(
+            "cell_lat_norm",
+            torch.tensor([0.5, -0.5]),
+        )
+        self.omega_deg_per_hour = 360.0 / (27.2753 * 24.0)
+
+        # cell 공유 head. 입력 128은 CNN 출력 채널(d_model과 무관).
+        head_in_features = 128 + 2
+        self.source_speed_head = nn.Linear(head_in_features, 1)
+        self.source_gate_head = nn.Linear(head_in_features, 1)
+        self.transit_residual_head = nn.Linear(head_in_features, 1)
+        self.lon_offset_head = nn.Linear(head_in_features, 1)
 
         # ballistic 상수: tau[h] = dist_eff / s[/1000 km/s 스케일].
         # 1 AU = 1.496e8 km / 3.6e6 = 41.6. 학습 가능 -- Parker
@@ -468,6 +524,9 @@ class SolarWindBaseline(nn.Module):
         nn.init.zeros_(self.source_gate_head.bias)
         nn.init.zeros_(self.transit_residual_head.weight)
         nn.init.zeros_(self.transit_residual_head.bias)
+        # zero-init -> delta-lon=0 = cell 중심에서 시작.
+        nn.init.zeros_(self.lon_offset_head.weight)
+        nn.init.zeros_(self.lon_offset_head.bias)
 
         # ============================================================
         # 6.6 Persistence anchor + fusion gate -- v5a
@@ -533,11 +592,14 @@ class SolarWindBaseline(nn.Module):
         )
 
         # 분석용: 마지막 forward의 전파 변수들 (detached).
+        # v7: 소스 축이 (B,20)에서 (B,20,2,4)로 바뀌었다 (analysis.py
+        # 가 소비).
         self.last_surge_prob = None
         self.last_coverage = None
         self.last_source_speed_kms = None
         self.last_arrival_hours = None
         self.last_source_gate = None
+        self.last_source_lon_deg = None
         self.last_fusion_alpha = None
 
         # ============================================================
@@ -569,8 +631,9 @@ class SolarWindBaseline(nn.Module):
     def forward(self, images, wind, return_aux=False):
         # return_aux=True면 (prediction, aux dict)를 반환한다. aux는
         # train.py의 보조 손실용: hindcast 재구성(B,13), image_keep
-        # (B,) modality-drop 마스크, transit_residual(B,20). 기본값
-        # False라 inference.py 등 기존 call site는 그대로 동작한다.
+        # (B,) modality-drop 마스크, transit_residual(B,20,2,4),
+        # source_weight(B,20,2,4,25). 기본값 False라 inference.py 등
+        # 기존 call site는 그대로 동작한다.
 
         batch_size = wind.size(0)
 
@@ -618,37 +681,41 @@ class SolarWindBaseline(nn.Module):
             # (B, 128, 20, 4, 4)
 
             # pool the spatial grid to 2x4 (full longitude columns
-            # survive, latitude folds to hemispheres), then move the
-            # time dimension and flatten:
+            # survive, latitude folds to hemispheres):
             #
-            # (B, 128, 20, 2, 4) -> (B, 20, 1024)
+            # (B, 128, 20, 2, 4)
             image_features = self.spatial_pool(image_features)
-            image_features = image_features.permute(
-                0, 2, 1, 3, 4
-            ).flatten(2)
 
-            # (B,20,1024)
-            #       ↓
-            # (B,20,d_model)
+            # v7: readout은 flatten 전의 cell feature를 직접 쓴다
+            # (per-cell 소스 attribution). 토큰 경로(projection ->
+            # fusion/surge 요약)는 v6와 동일하게 유지.
+            #
+            # (B, 128, 20, 2, 4) -> (B, 20, 2, 4, 128)
+            cell_features = image_features.permute(0, 2, 3, 4, 1)
+
+            # (B, 128, 20, 2, 4) -> (B, 20, 1024) -> (B, 20, d_model)
             image_tokens = self.image_projection(
-                image_features
+                image_features.permute(0, 2, 1, 3, 4).flatten(2)
             )
 
             # (B,20,1) Bernoulli keep-mask, resampled every forward
             # pass. Zeroes the whole image token; the time/modality
             # embeddings added below still mark its slot.
             # Training only -- evaluation sees every frame.
+            # v7: 같은 마스크를 readout의 cell feature에도 적용해 두
+            # 경로가 항상 같은 프레임 가림을 본다.
             if self.training and self.time_mask_prob > 0:
-                keep = (
+                time_keep = (
                     torch.rand(
-                        image_tokens.size(0),
-                        image_tokens.size(1),
-                        1,
+                        batch_size, 20, 1,
                         device=image_tokens.device,
                     )
                     >= self.time_mask_prob
                 )
-                image_tokens = image_tokens * keep
+                image_tokens = image_tokens * time_keep
+                cell_features = (
+                    cell_features * time_keep.view(batch_size, 20, 1, 1, 1)
+                )
 
             # Modality dropout: (B,1,1) per-sample keep-mask zeroing
             # all 20 image tokens at once. Unlike wind-only mode the
@@ -657,53 +724,86 @@ class SolarWindBaseline(nn.Module):
             #
             # image_keep: drop된 샘플의 hindcast 재구성은 상수라
             # train.py가 이 마스크로 해당 샘플을 손실에서 제외한다.
+            # force_image_drop은 분석용 결정론 drop (constructor 참고).
             image_keep = torch.ones(
                 batch_size, device=image_tokens.device
             )
+            modal_keep = None
             if self.training and self.modality_drop_prob > 0:
-                keep = (
+                modal_keep = (
                     torch.rand(
-                        image_tokens.size(0),
-                        1,
-                        1,
+                        batch_size, 1, 1,
                         device=image_tokens.device,
                     )
                     >= self.modality_drop_prob
                 )
-                image_tokens = image_tokens * keep
-                image_keep = keep.float().reshape(batch_size)
+            if self.force_image_drop:
+                modal_keep = torch.zeros(
+                    batch_size, 1, 1,
+                    dtype=torch.bool, device=image_tokens.device,
+                )
+            if modal_keep is not None:
+                image_tokens = image_tokens * modal_keep
+                cell_features = (
+                    cell_features * modal_keep.view(batch_size, 1, 1, 1, 1)
+                )
+                image_keep = modal_keep.float().reshape(batch_size)
 
             # ========================================================
-            # PROPAGATION READOUT (section 6.5)
+            # PROPAGATION READOUT (section 6.5, v7 source-map)
             # ========================================================
-            # post-mask 토큰에서 계산: modality drop된 샘플은 상수
-            # 재구성이 되므로 image_keep으로 손실에서 제외되고,
+            # post-mask cell feature에서 계산: modality drop된 샘플은
+            # 상수 재구성이 되므로 image_keep으로 손실에서 제외되고,
             # time-mask된 개별 프레임은 head bias가 주는 "평균적
             # 소스"로 나타난다 (확률적 증강 노이즈로 수용).
             #
-            # source_speed:     (B,20,1)  [0.25, 0.90] = 250..900 km/s
-            # source_gate:      (B,20,1)  >= 0
-            # transit_residual: (B,20)    tanh = delta/24h
-            # arrival:          (B,20)    도착 시각, 음수 = 과거
-            # v_image:          (B,25)    과거 13점 + 미래 12점
+            # source_speed:     (B,20,2,4)  [0.25,0.90] = 250..900 km/s
+            # source_gate:      (B,20,2,4)  >= 0
+            # transit_residual: (B,20,2,4)  tanh = delta/24h
+            # source_lon:       (B,20,2,4)  도(음수=동쪽), cell+offset
+            # arrival:          (B,20,2,4)  도착 시각, 음수 = 과거
+            # weight:           (B,20,2,4,25)  gate * kernel
+            # v_image:          (B,25)      과거 13점 + 미래 12점
             # ========================================================
 
+            coords = torch.cat(
+                [
+                    self.cell_lat_norm.view(1, 1, 2, 1, 1).expand(
+                        batch_size, 20, 2, 4, 1
+                    ),
+                    (self.cell_lon_deg / 90.0).view(1, 1, 1, 4, 1).expand(
+                        batch_size, 20, 2, 4, 1
+                    ),
+                ],
+                dim=-1,
+            )
+            head_input = torch.cat([cell_features, coords], dim=-1)
+
             source_speed = 0.25 + 0.65 * torch.sigmoid(
-                self.source_speed_head(image_tokens)
-            )
-            source_gate = F.softplus(
-                self.source_gate_head(image_tokens)
-            )
-            transit_residual = torch.tanh(
-                self.transit_residual_head(image_tokens)
+                self.source_speed_head(head_input)
             ).squeeze(-1)
+            source_gate = F.softplus(
+                self.source_gate_head(head_input)
+            ).squeeze(-1)
+            transit_residual = torch.tanh(
+                self.transit_residual_head(head_input)
+            ).squeeze(-1)
+            source_lon = self.cell_lon_deg.view(1, 1, 1, 4) + (
+                22.5 * torch.tanh(
+                    self.lon_offset_head(head_input)
+                ).squeeze(-1)
+            )
+
+            # 자전 대기: 경도가 CM(지구 방향, lon=0)까지 오는 시간.
+            # 동쪽(음수) 소스는 양수(미래 출발), 서쪽은 음수(이미 출발).
+            rotation_wait = -source_lon / self.omega_deg_per_hour
 
             dist_eff = 30.0 + 25.0 * torch.sigmoid(self.dist_eff_raw)
-            transit = (
-                dist_eff / source_speed.squeeze(-1)
-                + 24.0 * transit_residual
+            transit = dist_eff / source_speed + 24.0 * transit_residual
+            arrival = (
+                rotation_wait + transit
+                - self.image_age_hours.view(1, 20, 1, 1)
             )
-            arrival = transit - self.image_age_hours
 
             time_grid = torch.cat(
                 [self.hindcast_hours, self.horizon_hours]
@@ -712,13 +812,14 @@ class SolarWindBaseline(nn.Module):
                 -((time_grid - arrival.unsqueeze(-1)) ** 2)
                 / (2.0 * self.kernel_sigma_hours**2)
             )
-            weight = source_gate * kernel
+            weight = source_gate.unsqueeze(-1) * kernel
 
             fallback = F.softplus(self.fallback_weight_raw)
+            weight_sum = weight.sum(dim=(1, 2, 3))
             v_image = (
-                (weight * source_speed).sum(dim=1)
+                (weight * source_speed.unsqueeze(-1)).sum(dim=(1, 2, 3))
                 + fallback * self.climatology
-            ) / (weight.sum(dim=1) + fallback)
+            ) / (weight_sum + fallback)
 
             hindcast = v_image[:, : self.hindcast_hours.numel()]
             v_image_future = v_image[:, self.hindcast_hours.numel():]
@@ -754,13 +855,12 @@ class SolarWindBaseline(nn.Module):
             # 기여 비율 (1 - fallback 지분). 계속 낮으면 전파 branch가
             # 사실상 climatology라는 실패 신호.
             self.last_coverage = (
-                weight.sum(dim=1) / (weight.sum(dim=1) + fallback)
+                weight_sum / (weight_sum + fallback)
             ).detach()
-            self.last_source_speed_kms = (
-                source_speed.detach().squeeze(-1) * 1000.0
-            )
+            self.last_source_speed_kms = source_speed.detach() * 1000.0
             self.last_arrival_hours = arrival.detach()
-            self.last_source_gate = source_gate.detach().squeeze(-1)
+            self.last_source_gate = source_gate.detach()
+            self.last_source_lon_deg = source_lon.detach()
         else:
             # wind-only diagnostic: skip the CNN and drop the image
             # stream entirely -- the encoder runs on wind tokens only.
@@ -772,11 +872,13 @@ class SolarWindBaseline(nn.Module):
             image_summary = None
             surge_logit = None
             surge_prob = None
+            weight = None
             self.last_surge_prob = None
             self.last_coverage = None
             self.last_source_speed_kms = None
             self.last_arrival_hours = None
             self.last_source_gate = None
+            self.last_source_lon_deg = None
 
         # ============================================================
         # CORRECTION PATH: encoder + decoder + head (v6a: 통째 제거)
@@ -942,5 +1044,9 @@ class SolarWindBaseline(nn.Module):
                 "image_keep": image_keep,
                 "transit_residual": transit_residual,
                 "surge_logit": surge_logit,
+                # v7: backmapping alignment loss(train.py)용 미정규화
+                # kernel weight (B,20,2,4,25). label에서 역산한 소스
+                # 궤적 분포와 이 분포의 정규화본을 KL로 맞춘다.
+                "source_weight": weight,
             }
         return prediction

@@ -44,7 +44,7 @@ def is_physical_param(name):
         }
         or name in {
             "source_speed_head.bias", "source_gate_head.bias",
-            "transit_residual_head.bias",
+            "transit_residual_head.bias", "lon_offset_head.bias",
         }
     )
 
@@ -82,6 +82,70 @@ scaler = torch.amp.GradScaler(DEVICE.type, enabled=USE_AMP)
 surge_pos_weight = torch.tensor(SURGE_POS_WEIGHT, device=DEVICE)
 checkpoint_path = RUN_DIR / "best_model.pth"
 
+
+def alignment_kl(model, aux, wind, target):
+    """v7 backmapping alignment: label 역산 소스 궤적 vs kernel weight.
+
+    config.py의 ALIGN_* 주석이 설계 근거. 여기는 조립만:
+
+      y_series (B,25) = 관측 wind 13점(-72..0h) + target 12점(+6..+72h)
+      tau* = D_eff.detach() / y            radial 통과시간 역산
+      lon*(t,u) = -omega*(u - tau* + age_t)  각 프레임에서의 소스 경도
+      q (B,20,2,4,25): lon* 주변 가우시안, 위도 2행 균등 분할, 가시
+        원반 밖(|lon*|>90)은 질량 0. 소스 축 정규화.
+      w~: aux["source_weight"] 정규화본.
+      KL(q || w~)를 유효 (sample, u)에 평균 -- modality drop 샘플과
+      전 프레임이 원반 밖인 u는 제외.
+
+    fp32 강제: kernel exp/정규화가 fp16에서 underflow하면 log(0)이 난다.
+    returns: (kl_mean, valid_share) -- 둘 다 스칼라 텐서/float.
+    """
+    with torch.autocast(DEVICE.type, enabled=False):
+        w = aux["source_weight"].float()
+        batch_size = w.size(0)
+        dist_eff = (
+            30.0 + 25.0 * torch.sigmoid(model.dist_eff_raw)
+        ).detach()
+        time_grid = torch.cat(
+            [model.hindcast_hours, model.horizon_hours]
+        )  # (25,)
+        ages = model.image_age_hours  # (20,)
+        omega = model.omega_deg_per_hour
+
+        y_series = torch.cat([wind[:, 7:], target], dim=1).float()
+        # [200,1200] km/s 클램프: 나눗셈 발산 방지 (라벨 이상치 방어).
+        tau_star = dist_eff / y_series.clamp(0.2, 1.2)  # (B,25)
+
+        # (B,20,25): 프레임 -> 출발까지의 시간차, 되감은 경도.
+        delta_t = (
+            time_grid.view(1, 1, -1)
+            - tau_star.unsqueeze(1)
+            + ages.view(1, -1, 1)
+        )
+        lon_star = -omega * delta_t
+        visible = lon_star.abs() <= 90.0
+
+        # (B,20,4,25) 경도 가우시안 -> 위도 2행 균등 -> (B,20,2,4,25)
+        gaussian = torch.exp(
+            -((model.cell_lon_deg.view(1, 1, 4, 1)
+               - lon_star.unsqueeze(2)) ** 2)
+            / (2.0 * ALIGN_SIGMA_DEG ** 2)
+        ) * visible.unsqueeze(2)
+        q = gaussian.unsqueeze(2).expand(-1, -1, 2, -1, -1) / 2.0
+        q_mass = q.sum(dim=(1, 2, 3))  # (B,25)
+        valid = (q_mass > 1e-6).float() * aux[
+            "image_keep"
+        ].float().unsqueeze(-1)
+        q = q / q_mass.clamp_min(1e-6).view(batch_size, 1, 1, 1, -1)
+
+        w = w + 1e-8
+        w = w / w.sum(dim=(1, 2, 3), keepdim=True)
+        kl = (q * (q.clamp_min(1e-12).log() - w.log())).sum(
+            dim=(1, 2, 3)
+        )  # (B,25)
+        kl_mean = (kl * valid).sum() / valid.sum().clamp(min=1.0)
+        return kl_mean, float(valid.mean())
+
 if checkpoint_path.exists():
     checkpoint_path.unlink()
 
@@ -101,6 +165,8 @@ def run_epoch(loader, training, hindcast_lambda):
     hindcast_value_count = 0.0
     diag_sums = {}
     diag_batches = 0
+    align_kl_sum = 0.0
+    align_batches = 0
     surge_probs = []
     surge_labels = []
     for batch in loader:
@@ -162,6 +228,17 @@ def run_epoch(loader, training, hindcast_lambda):
                         reduction="sum",
                     ) / keep.sum().clamp(min=1.0)
                     loss = loss + SURGE_LAMBDA * surge_bce
+
+                # v7 backmapping alignment KL: label에서 역산한 소스
+                # 궤적 분포로 kernel weight의 위치를 감독한다
+                # (alignment_kl docstring / config ALIGN_* 참고).
+                if aux["source_weight"] is not None:
+                    align_kl, _ = alignment_kl(
+                        model, aux, wind, target
+                    )
+                    loss = loss + ALIGN_LAMBDA * align_kl
+                    align_kl_sum += float(align_kl.detach())
+                    align_batches += 1
             if training:
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
@@ -226,6 +303,11 @@ def run_epoch(loader, training, hindcast_lambda):
     diag = {
         key: value / diag_batches for key, value in diag_sums.items()
     }
+    # v7 정렬 지표: KL(라벨 역산 궤적 || kernel weight). 하락 추세가
+    # "위치 감독이 실제로 정렬을 움직인다"의 1차 신호. train/val 모두
+    # 계산되지만 history에는 val 것만 실린다 (**val_diag).
+    if align_batches > 0:
+        diag["align_kl"] = align_kl_sum / align_batches
 
     # surge AUROC (Mann-Whitney rank). 확률이 연속이라 tie 보정은 생략.
     if surge_probs:
@@ -294,6 +376,7 @@ if __name__ == "__main__":
             f" hind={val_hindcast_rmse:.1f} alpha={alpha_mean:.3f} beta={beta_mean:.3f}"
             f" vstd={val_diag.get('src_speed_std_kms', float('nan')):.0f}"
             f" cov={val_diag.get('coverage_hind_mean', float('nan')):.2f}"
+            f" kl={val_diag.get('align_kl', float('nan')):.3f}"
             f" auroc={val_diag.get('surge_auroc', float('nan')):.3f}"
             f" D={dist_eff_h:.1f}"
             f" lr={learning_rate:.2e} seconds={elapsed:.1f}"
