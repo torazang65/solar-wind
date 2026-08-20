@@ -24,7 +24,7 @@ if torch.cuda.is_available():
 DATA_ROOT = Path("public_dataset/competition_dataset_6h")
 # train.py가 시작 시 기존 best_model.pth를 지우므로, 런이 바뀔 때마다
 # 이름을 올려 이전 산출물을 보존한다.
-OUTPUT_DIR = Path(f"outputs/transformer_v5c_corrdrop_torazang65_seed{SEED}")
+OUTPUT_DIR = Path(f"outputs/transformer_v5b_surge_torazang65_seed{SEED}")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 CACHE_DIR = Path("outputs/cache")
 
@@ -62,6 +62,15 @@ HINDCAST_LAMBDA_DECAY_EPOCHS = 20
 # ballistic 잔차(tanh 출력 = delta/24h)의 L2 계수. tau를 D_eff/s
 # backbone 근방에 잡아둬 "값을 아무 시점에나 배치"하는 퇴화를 막는다.
 TRANSIT_RESIDUAL_L2 = 3e-3
+
+# ---- v5b: surge head 보조 손실 ----
+# label: max_h W(t+h) - last_wind > threshold (speed_ablation의 surge
+# 정의와 동일). BCE는 작은 regularizer로 취급 -- RMSE를 직접 사는
+# 항이 아니라 Δ채널 표현과 fusion gate 판별 특징을 만드는 항.
+SURGE_THRESHOLD_KMS = 100.0
+SURGE_LAMBDA = 0.02
+# 클래스 불균형 보정 (val 기준 quiet:surge ~ 836:363 ~ 2.3).
+SURGE_POS_WEIGHT = 2.3
 # 물리 스칼라 param group의 lr 배율 (train.py is_physical_param).
 # AdamW 스텝은 ~lr이라 base lr 총합(~0.1)로는 O(1) 스케일 스칼라
 # (reversion logit, gate bias, dist_eff raw)가 초기값에 얼어붙는다.
@@ -128,6 +137,13 @@ MODEL_KWARGS = dict(
     # 판정: val 바닥이 epoch 4보다 뒤로 밀리는지 + 그 시점의
     # mechanism 성숙도(vstd/cov/hind). 고정 기본값, 스윕 금지.
     correction_drop_prob=0.3,
+    # v5b: 이미지 전용 surge head + 그 확률을 fusion gate에 연결.
+    # v5a 분해의 결함 지도(slow-quiet align -10.6, gate 레짐 무차별)
+    # 를 표적한다. False면 v5c 구조와 동일 (구 체크포인트 분석 시
+    # OUTPUT_DIR과 함께 되돌릴 것 -- gate 입력 폭이 달라진다).
+    # 판정: branch_decomposition의 slow-quiet align 회복 + alpha의
+    # surge/quiet 분화 + val surge AUROC.
+    use_surge_head=True,
     # stem 입력 채널. add_diff_channels=True면 원본 채널 수의 2배.
     # v3 이전으로 되돌리려면 (2, False)로.
     image_in_channels=4,

@@ -80,6 +80,7 @@ class SolarWindBaseline(nn.Module):
         time_mask_prob=0.15,
         modality_drop_prob=0.25,
         correction_drop_prob=0.0,
+        use_surge_head=False,
         nhead=8,
         num_encoder_layers=3,
         num_decoder_layers=2,
@@ -458,8 +459,12 @@ class SolarWindBaseline(nn.Module):
         # 보는 게 맞다 (quiet 판단은 wind 상태와 결합된 정보).
         # modality drop 시 이미지 요약이 0이어도 bias 경로로 alpha를
         # 낮추는 것을 학습할 수 있다.
+        # v5b: surge 확률(6.7)이 추가 입력 -- gate가 "quiet면 닫고
+        # pre-surge면 연다"를 할 수 있는 판별 특징.
         self.fusion_image_proj = nn.Linear(d_model, 16)
-        self.fusion_gate_head = nn.Linear(16 + 4, 12)
+        self.fusion_gate_head = nn.Linear(
+            16 + 4 + (1 if use_surge_head else 0), 12
+        )
 
         # zero-init + bias -2 -> alpha=0.12. 초기 v_img가 c 근방이라
         # 시작 효과는 beta 0.12 상당의 mean-reversion뿐이다. alpha의
@@ -469,7 +474,39 @@ class SolarWindBaseline(nn.Module):
         nn.init.zeros_(self.fusion_gate_head.weight)
         nn.init.constant_(self.fusion_gate_head.bias, -2.0)
 
+        # ============================================================
+        # 6.7 Surge head -- v5b
+        # ============================================================
+        # v5a branch decomposition이 남긴 결함 지도:
+        #   - slow-quiet에서 alignment gain -10.6: quiet인데 v_img~430
+        #     이 persistence(~360)를 끌어올리는 false-positive 소스
+        #   - fusion gate가 레짐 무차별 상수(alpha 0.61~0.66): gate
+        #     입력(wind 요약 + 이미지 평균)으로는 "quiet slow"와
+        #     "pre-surge slow"를 구분할 특징이 없다 (slow-surge는
+        #     align +22.8이라 함부로 닫혀서도 안 된다)
+        #
+        # 처방: 미래 target에서 파생한 binary surge label
+        # (max_h W(t+h) - last_wind > 100 km/s, train.py)로 이미지
+        # 전용 surge 확률을 supervise하고 그 확률을 fusion gate에
+        # 연결한다. BCE는 v4가 회귀 loss로 주지 못했던 분류
+        # supervision을 Δ채널(dimming/증광)에 준다.
+        #
+        # 이미지 전용인 이유: label이 미래 파생이라 wind를 봐도 누수는
+        # 아니지만, wind를 주면 head가 wind 지름길로 새서 CNN(특히
+        # Δ채널)으로 가는 gradient가 약해진다. wind와의 결합 판단은
+        # 어차피 wind를 보는 fusion gate에서 일어난다.
+        #
+        # 입력 요약: mean = 디스크에 뭐가 있나, last5 - first5 = 최근
+        # 발달 (CME 신호는 최근 프레임의 변화에 산다).
+        self.use_surge_head = use_surge_head
+        self.surge_head = nn.Sequential(
+            nn.Linear(2 * d_model, 32),
+            nn.GELU(),
+            nn.Linear(32, 1),
+        )
+
         # 분석용: 마지막 forward의 전파 변수들 (detached).
+        self.last_surge_prob = None
         self.last_coverage = None
         self.last_source_speed_kms = None
         self.last_arrival_hours = None
@@ -668,6 +705,27 @@ class SolarWindBaseline(nn.Module):
                 self.fusion_image_proj(image_tokens.mean(dim=1))
             )
 
+            # surge head (6.7): 이미지 전용, post-mask 토큰.
+            # modality drop된 샘플은 상수 logit이 되므로 train.py가
+            # image_keep으로 BCE에서 제외한다.
+            if self.use_surge_head:
+                surge_logit = self.surge_head(
+                    torch.cat(
+                        [
+                            image_tokens.mean(dim=1),
+                            image_tokens[:, -5:].mean(dim=1)
+                            - image_tokens[:, :5].mean(dim=1),
+                        ],
+                        dim=-1,
+                    )
+                )
+                surge_prob = torch.sigmoid(surge_logit)
+                self.last_surge_prob = surge_prob.detach().squeeze(-1)
+            else:
+                surge_logit = None
+                surge_prob = None
+                self.last_surge_prob = None
+
             # coverage: 각 격자점(과거 13 + 미래 12) 재구성에서 이미지
             # 기여 비율 (1 - fallback 지분). 계속 낮으면 전파 branch가
             # 사실상 climatology라는 실패 신호.
@@ -688,6 +746,9 @@ class SolarWindBaseline(nn.Module):
             transit_residual = None
             v_image_future = None
             image_summary = None
+            surge_logit = None
+            surge_prob = None
+            self.last_surge_prob = None
             self.last_coverage = None
             self.last_source_speed_kms = None
             self.last_arrival_hours = None
@@ -834,9 +895,14 @@ class SolarWindBaseline(nn.Module):
                 ],
                 dim=-1,
             )
+            gate_inputs = [image_summary, wind_summary]
+            if surge_prob is not None:
+                # gradient를 끊지 않는다: BCE가 의미를 앵커하고,
+                # forecast loss의 미세 조정은 허용.
+                gate_inputs.append(surge_prob)
             alpha = torch.sigmoid(
                 self.fusion_gate_head(
-                    torch.cat([image_summary, wind_summary], dim=-1)
+                    torch.cat(gate_inputs, dim=-1)
                 )
             )
             prediction = (
@@ -859,5 +925,6 @@ class SolarWindBaseline(nn.Module):
                 "hindcast": hindcast,
                 "image_keep": image_keep,
                 "transit_residual": transit_residual,
+                "surge_logit": surge_logit,
             }
         return prediction

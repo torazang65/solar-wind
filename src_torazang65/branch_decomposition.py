@@ -81,6 +81,8 @@ def collect(model, loader):
         "src_speed", "arrival", "gate",
     )
     out = {k: [] for k in keys}
+    # v5b 체크포인트 한정 (v5a/v5c에서는 None -> 빈 리스트로 남음).
+    out["surge_prob"] = []
     for batch in loader:
         images = batch["images"].to(DEVICE, non_blocking=PIN_MEMORY)
         wind = batch["wind"].to(DEVICE, non_blocking=PIN_MEMORY)
@@ -105,8 +107,15 @@ def collect(model, loader):
             model.last_arrival_hours.float().cpu().numpy()
         )
         out["gate"].append(model.last_source_gate.float().cpu().numpy())
+        if model.last_surge_prob is not None:
+            out["surge_prob"].append(
+                model.last_surge_prob.float().cpu().numpy()
+            )
 
-    a = {k: np.concatenate(v).astype(np.float64) for k, v in out.items()}
+    a = {
+        k: np.concatenate(v).astype(np.float64)
+        for k, v in out.items() if v
+    }
     # /1000 스케일 -> km/s (alpha/gate 무단위, arrival은 시간,
     # src_speed는 model이 이미 km/s로 stash)
     for k in ("pred", "base", "v_img", "correction",
@@ -376,7 +385,7 @@ if __name__ == "__main__":
             mask = group_mask & condition_mask
             if int(mask.sum()) < 30:
                 continue
-            regime_rows.append({
+            row = {
                 "group": group_label,
                 "condition": condition_label,
                 "count": int(mask.sum()),
@@ -386,7 +395,14 @@ if __name__ == "__main__":
                 "correction_std_kms":
                     float(a["correction"][mask].std()),
                 "v_img_std_kms": float(a["v_img"][mask].std()),
-            })
+            }
+            # v5b: surge head가 gate 판별 특징으로 일하는지 --
+            # surge_prob이 surge 조건에서 높고 quiet에서 낮아야 한다.
+            if "surge_prob" in a:
+                row["surge_prob_mean"] = float(
+                    a["surge_prob"][mask].mean()
+                )
+            regime_rows.append(row)
     regime = pd.DataFrame(regime_rows)
     regime.to_csv(DECOMP_DIR / "regime_stats.csv", index=False)
     print("\n=== 레짐별 성분 통계 ===")
@@ -395,13 +411,15 @@ if __name__ == "__main__":
                            float_format=lambda v: f"{v:8.2f}"))
 
     # 로컬 추가 분석용 per-sample dump.
-    np.savez(
-        DECOMP_DIR / "components.npz",
+    dump = dict(
         target=a["target"], wind=a["wind"], speed=a["speed"],
         last_wind=a["last_wind"], alpha=a["alpha"],
         v_img=a["v_img"], base=a["base"], correction=a["correction"],
         src_speed=a["src_speed"], arrival=a["arrival"],
         gate=a["gate"], climatology_kms=climatology_kms,
     )
+    if "surge_prob" in a:
+        dump["surge_prob"] = a["surge_prob"]
+    np.savez(DECOMP_DIR / "components.npz", **dump)
 
     print(f"\nsaved to: {DECOMP_DIR.resolve()}")
