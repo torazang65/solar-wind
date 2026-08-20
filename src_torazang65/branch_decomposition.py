@@ -417,6 +417,18 @@ if __name__ == "__main__":
         v_img=a["v_img"], base=a["base"], correction=a["correction"],
         src_speed=a["src_speed"], arrival=a["arrival"],
         gate=a["gate"], climatology_kms=climatology_kms,
+        # v6a: propagation_alignment.py(로컬)가 kernel weight를 정확히
+        # 재구성하는 데 필요한 학습된 스칼라들. 없으면 그 스크립트는
+        # init 기본값으로 대체한다 (구형 npz 호환).
+        kernel_sigma_hours=float(model.kernel_sigma_hours),
+        dist_eff_h=float(
+            30.0 + 25.0 * torch.sigmoid(model.dist_eff_raw.detach())
+        ),
+        fallback_weight=float(
+            torch.nn.functional.softplus(
+                model.fallback_weight_raw.detach()
+            )
+        ),
     )
     if "surge_prob" in a:
         dump["surge_prob"] = a["surge_prob"]

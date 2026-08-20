@@ -515,7 +515,9 @@ if __name__ == "__main__":
     if not getattr(model, "use_correction", True):
         raise SystemExit(
             "use_correction=False(v6a) 모델은 encoder/decoder가 없어 "
-            "attention 분석 대상이 아님 -- branch_decomposition을 쓸 것"
+            "attention 분석 대상이 아님. 시간 정렬 진단은 "
+            "branch_decomposition.py를 돌린 뒤 propagation_alignment.py"
+            "(components.npz 기반, 로컬 실행 가능)가 대체한다"
         )
 
     # 속도 3분위 경계 (검증셋 입력 wind 평균, km/s)
