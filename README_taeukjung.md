@@ -522,3 +522,21 @@ bash scripts_taeukjung/run_baseline_v2_5_server_cuda.sh diagnose
 The default 64 px model has 953,520 parameters. See
 `MODEL_BASELINE_V2_5_taeukjung.md` for the controlled V2.4 comparison and the
 recommended 128 px command.
+
+## Selective Solar Hybrid V10.1
+
+V10.1 keeps V10's masked Seokho V5b image encoder, fixed-lag propagation path,
+and compact Transformer, but applies the validation decomposition directly.
+The neural wind residual is disabled, AR(2) remains the exact wind anchor, and
+the free Transformer correction is gated by image-only surge probability and
+fast-wind/quiet suppression.
+
+```bash
+bash scripts_taeukjung/run_solar_hybrid_v10_1_server_cuda.sh train
+bash scripts_taeukjung/run_solar_hybrid_v10_1_server_cuda.sh diagnose
+bash scripts_taeukjung/run_solar_hybrid_v10_1_server_cuda.sh infer
+```
+
+The default is 64 px and writes seed-isolated outputs under
+`/home/jovyan/outputs/solar_hybrid_v10_1_taeukjung_seed777`. See
+`MODEL_SOLAR_HYBRID_V10_1_taeukjung.md` for the component evidence and gate.

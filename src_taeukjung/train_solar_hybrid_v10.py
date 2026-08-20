@@ -45,6 +45,12 @@ from model_solar_hybrid_v10 import (
 )
 
 
+FEATURE_SCHEMA = (
+    "seokho_v5b_masked_intensity_signed_delta4_"
+    "ar2_fixed96h_bounded_components_v1"
+)
+
+
 class ExponentialMovingAverage:
     def __init__(self, model, decay):
         if not 0.0 < decay < 1.0:
@@ -203,13 +209,21 @@ def make_optimizer(model):
 def make_scheduler(optimizer, peak_lr):
     warmup_epochs = int(os.getenv("V10_WARMUP_EPOCHS", "3"))
     minimum_lr = float(os.getenv("V10_MIN_LR", "1e-6"))
+    decay_epochs = int(os.getenv("V10_COSINE_DECAY_EPOCHS", str(EPOCHS)))
     if not 0 < warmup_epochs < EPOCHS:
         raise ValueError("V10_WARMUP_EPOCHS must be between 1 and EPOCHS - 1")
+    if not warmup_epochs < decay_epochs <= EPOCHS:
+        raise ValueError(
+            "V10_COSINE_DECAY_EPOCHS must be after warmup and no greater than EPOCHS"
+        )
 
     def learning_rate_factor(step):
         if step < warmup_epochs:
             return (step + 1) / warmup_epochs
-        progress = (step - warmup_epochs) / max(1, EPOCHS - warmup_epochs)
+        progress = min(
+            1.0,
+            (step - warmup_epochs) / max(1, decay_epochs - warmup_epochs),
+        )
         floor = minimum_lr / peak_lr
         cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
         return floor + (1.0 - floor) * cosine
@@ -472,7 +486,14 @@ def save_validation_predictions(metrics, targets, path):
     pd.concat([predictions, actual], axis=1).to_csv(path, index=False)
 
 
-def main():
+def main(
+    model_class=SolarWindAnchoredHybridV10,
+    architecture_name=ARCHITECTURE_NAME,
+    version=10,
+    file_stem=FILE_STEM,
+    feature_schema=FEATURE_SCHEMA,
+    extra_model_kwargs=None,
+):
     wind_only = os.getenv("WIND_ONLY", "0").lower() in {"1", "true", "yes"}
     chain_balanced = os.getenv("CHAIN_BALANCED_SAMPLING", "0").lower() in {
         "1",
@@ -510,7 +531,8 @@ def main():
     val_loader = make_chain_loader(val_dataset, training=False)
 
     model_kwargs = build_model_kwargs(ar_fit, ar_scale, wind_only=wind_only)
-    model = SolarWindAnchoredHybridV10(**model_kwargs).to(DEVICE)
+    model_kwargs.update(extra_model_kwargs or {})
+    model = model_class(**model_kwargs).to(DEVICE)
     optimizer, peak_lr, weight_decay, physical_multiplier = make_optimizer(model)
     scheduler, warmup_epochs, minimum_lr = make_scheduler(optimizer, peak_lr)
     scaler = torch.amp.GradScaler(AMP_DEVICE_TYPE, enabled=USE_AMP)
@@ -538,13 +560,13 @@ def main():
         "ar_validation_rmse_km_s": ar_val_micro,
         "ar_validation_chain_macro_rmse_km_s": ar_val_macro,
     }
-    (OUTPUT_DIR / f"{FILE_STEM}_chain_manifest.json").write_text(
+    (OUTPUT_DIR / f"{file_stem}_chain_manifest.json").write_text(
         json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
     )
 
-    checkpoint_path = OUTPUT_DIR / f"best_{FILE_STEM}.pth"
-    history_path = OUTPUT_DIR / f"{FILE_STEM}_history.csv"
-    validation_path = OUTPUT_DIR / f"{FILE_STEM}_validation_predictions.csv"
+    checkpoint_path = OUTPUT_DIR / f"best_{file_stem}.pth"
+    history_path = OUTPUT_DIR / f"{file_stem}_history.csv"
+    validation_path = OUTPUT_DIR / f"{file_stem}_validation_predictions.csv"
     if checkpoint_path.exists():
         checkpoint_path.unlink()
 
@@ -552,7 +574,7 @@ def main():
         parameter.numel() for parameter in model.parameters() if parameter.requires_grad
     )
     print(
-        f"architecture={FILE_STEM} device={DEVICE} parameters={parameter_count:,} "
+        f"architecture={file_stem} device={DEVICE} parameters={parameter_count:,} "
         f"wind_only={wind_only} image_size={IMAGE_SIZE} spatial_grid=2x4 "
         f"train_chains={train_chains.count} val_chains={val_chains.count} "
         f"chain_balanced={chain_balanced} lr={peak_lr:.2e} "
@@ -646,8 +668,8 @@ def main():
             epochs_without_improvement = 0
             torch.save(
                 {
-                    "architecture": ARCHITECTURE_NAME,
-                    "version": 10,
+                    "architecture": architecture_name,
+                    "version": version,
                     "model_state_dict": validation_model.state_dict(),
                     "model_kwargs": model_kwargs,
                     "epoch": epoch,
@@ -662,14 +684,14 @@ def main():
                         "soft_cubic_strength": SOFT_CUBIC_STRENGTH,
                         "solar_disk_mask": SOLAR_DISK_MASK,
                         "solar_disk_radius_fraction": SOLAR_DISK_RADIUS_FRACTION,
-                        "feature_schema": (
-                            "seokho_v5b_masked_intensity_signed_delta4_"
-                            "ar2_fixed96h_bounded_components_v1"
-                        ),
+                        "feature_schema": feature_schema,
                         "spatial_grid": [2, 4],
                         "ema_decay": ema_decay,
                         "warmup_epochs": warmup_epochs,
                         "minimum_learning_rate": minimum_lr,
+                        "cosine_decay_epochs": int(
+                            os.getenv("V10_COSINE_DECAY_EPOCHS", str(EPOCHS))
+                        ),
                         "optimizer_weight_decay": weight_decay,
                     },
                 },
@@ -688,7 +710,7 @@ def main():
     )
     plt.ylabel("RMSE (km/s)")
     plt.tight_layout()
-    plt.savefig(OUTPUT_DIR / f"{FILE_STEM}_learning_curve.png", dpi=140)
+    plt.savefig(OUTPUT_DIR / f"{file_stem}_learning_curve.png", dpi=140)
     print(f"saved: {checkpoint_path.resolve()} best_val_rmse={best_val_rmse:.3f}")
 
 

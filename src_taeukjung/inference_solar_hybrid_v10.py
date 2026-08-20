@@ -32,12 +32,16 @@ from model_solar_hybrid_v10 import (
 )
 
 
-def load_best_model():
-    checkpoint_path = OUTPUT_DIR / f"best_{FILE_STEM}.pth"
+def load_best_model(
+    model_class=SolarWindAnchoredHybridV10,
+    architecture_name=ARCHITECTURE_NAME,
+    file_stem=FILE_STEM,
+):
+    checkpoint_path = OUTPUT_DIR / f"best_{file_stem}.pth"
     checkpoint = torch.load(checkpoint_path, map_location=DEVICE, weights_only=True)
-    if checkpoint.get("architecture") != ARCHITECTURE_NAME:
+    if checkpoint.get("architecture") != architecture_name:
         raise ValueError(
-            f"not a {ARCHITECTURE_NAME} checkpoint: "
+            f"not a {architecture_name} checkpoint: "
             f"{checkpoint.get('architecture')}"
         )
     checkpoint_preprocess = checkpoint["preprocess"]
@@ -57,11 +61,11 @@ def load_best_model():
                 f"key={key}, current={current}, checkpoint={expected}"
             )
 
-    model = SolarWindAnchoredHybridV10(**checkpoint["model_kwargs"]).to(DEVICE)
+    model = model_class(**checkpoint["model_kwargs"]).to(DEVICE)
     model.load_state_dict(checkpoint["model_state_dict"], strict=True)
     model.eval()
     print(
-        f"loaded {FILE_STEM} best epoch={checkpoint['epoch']} "
+        f"loaded {file_stem} best epoch={checkpoint['epoch']} "
         f"val_rmse={checkpoint['val_rmse_km_s']:.3f} "
         f"val_chain_macro_rmse={checkpoint['val_chain_macro_rmse_km_s']:.3f} "
         f"image_size={checkpoint['model_kwargs']['image_size']} "
@@ -89,10 +93,13 @@ def predict(model, loader, return_components=False):
                 components = {}
         predictions.append(prediction.float().cpu().numpy() * 1000.0)
         for name, value in components.items():
-            if name == "fusion_alpha":
-                continue
+            scale = 1.0 if name in {
+                "fusion_alpha",
+                "correction_gate",
+                "surge_probability",
+            } else 1000.0
             component_values.setdefault(name, []).append(
-                value.float().cpu().numpy() * 1000.0
+                value.float().cpu().numpy() * scale
             )
         sample_ids.extend(batch["sample_id"])
         if "chain_id" in batch:
@@ -127,8 +134,12 @@ def metrics_by_horizon(actual, prediction):
     return pd.DataFrame(rows)
 
 
-def main():
-    model, _ = load_best_model()
+def main(
+    model_class=SolarWindAnchoredHybridV10,
+    architecture_name=ARCHITECTURE_NAME,
+    file_stem=FILE_STEM,
+):
+    model, _ = load_best_model(model_class, architecture_name, file_stem)
     val_chains = infer_temporal_chains(val_inputs, IMAGE_COLUMNS)
     val_dataset = ChainAwareSolarWindDataset(
         val_image_array,
@@ -140,11 +151,11 @@ def main():
     )
     val_loader = make_chain_loader(val_dataset, training=False)
 
-    print("\n[Running V10 Validation Evaluation]")
+    print(f"\n[Running {file_stem} Validation Evaluation]")
     val_prediction, val_ids, chain_ids, _ = predict(model, val_loader)
     val_actual = np.asarray(val_targets[val_index], dtype=np.float64)
     metrics_by_horizon(val_actual, val_prediction).to_csv(
-        OUTPUT_DIR / f"{FILE_STEM}_validation_metrics.csv", index=False
+        OUTPUT_DIR / f"{file_stem}_validation_metrics.csv", index=False
     )
     prediction_frame = pd.DataFrame(
         val_prediction,
@@ -156,7 +167,7 @@ def main():
         val_actual, columns=[f"actual_{column}" for column in TARGET_COLUMNS]
     )
     pd.concat([prediction_frame, actual_frame], axis=1).to_csv(
-        OUTPUT_DIR / f"{FILE_STEM}_validation_predictions.csv", index=False
+        OUTPUT_DIR / f"{file_stem}_validation_predictions.csv", index=False
     )
     squared_error = (val_prediction - val_actual) ** 2
     overall_rmse = float(np.sqrt(np.mean(squared_error)))
@@ -180,7 +191,7 @@ def main():
     elif DEVICE.type == "mps":
         torch.mps.empty_cache()
 
-    print("\n[Running V10 Test Inference]")
+    print(f"\n[Running {file_stem} Test Inference]")
     test_dataset = SolarWindDataset(
         test_image_array,
         test_image_index,
@@ -192,7 +203,7 @@ def main():
     test_prediction, predicted_ids, _, _ = predict(model, test_loader)
     submission = pd.DataFrame(test_prediction, columns=TARGET_COLUMNS)
     submission.insert(0, "sample_id", predicted_ids)
-    submission_path = OUTPUT_DIR / f"{FILE_STEM}_submission.csv"
+    submission_path = OUTPUT_DIR / f"{file_stem}_submission.csv"
     submission.to_csv(submission_path, index=False)
     print(f"saved: {submission_path.resolve()}")
     print(f"shape: {submission.shape}")

@@ -427,3 +427,18 @@ image scale was `0.506%`, and the image residual RMS was `0.869 km/s` after the
 first epoch. V2.4's scale at its smoke checkpoint was about `0.005%`, so V2.5
 successfully increases the deep image path's practical influence. Full CUDA
 training is still required to evaluate generalization.
+
+## Solar Hybrid V10.1 selective correction
+
+V10's saved validation component decomposition identified a selection problem
+rather than a capacity problem. AR(2) scored `75.451`, the neural wind branch
+degraded it to `76.507`, propagation improved it to `68.784`, and full V10
+scored `68.078`. The Transformer correction improved surge cases but degraded
+fast and quiet subsets.
+
+V10.1 therefore freezes and removes the neural wind residual from the final
+sum, retains the bounded propagation term, and gates only the Transformer
+correction. The gate increases with the image-only surge probability and is
+suppressed for already-fast wind without surge evidence. The full CUDA result
+is pending; raw and gated component variants are emitted by the V10.1
+diagnostic for a controlled comparison.
