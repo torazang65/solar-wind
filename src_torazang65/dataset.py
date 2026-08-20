@@ -106,6 +106,10 @@ class SolarWindDataset(Dataset):
 
     def __getitem__(self, item):
         row_index = int(self.indexes[item])
+        # 원본 2채널만 반환한다. v4의 running-difference 채널은 model.py
+        # forward가 GPU에서 계산한다 -- 여기(CPU)서 만들면 DataLoader의
+        # in-flight 배치 메모리(worker x prefetch x pinned)가 2배가 되어
+        # 원격 pod에서 OOM(Killed)이 났다.
         images = np.asarray(self.image_array[self.image_indexes[row_index]], dtype=np.float32) / 255.0
         result = {
             "images": torch.from_numpy(images),
