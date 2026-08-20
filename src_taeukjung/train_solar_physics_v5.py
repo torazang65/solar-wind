@@ -434,7 +434,7 @@ def main(
         f"chain_balanced={chain_balanced} lr={SOLAR_PROBABILISTIC_LR:.2e} "
         f"wind_aux_weight={wind_aux_weight:.2f} "
         f"north_south_flip={training_image_flip_probability:.2f} "
-        f"residual_l2={residual_l2_weight:.3f} "
+        f"residual_l2={residual_l2_weight:.4f} "
         f"ema_decay={ema_decay} scheduler={scheduler_kind} "
         f"weight_decay={optimizer_weight_decay:.3f} loss=mse_km_s"
     )

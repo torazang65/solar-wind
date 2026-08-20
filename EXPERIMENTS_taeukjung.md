@@ -396,3 +396,24 @@ full validation/test inference, `(3868, 13)` submission generation, and all
 diagnostics. Its full validation RMSE was `75.426`; this is not a performance
 estimate. The next decision point is the complete 64 px CUDA run, followed by
 a controlled 128 px run if the fixed-lag hypothesis improves validation.
+
+## Deep Fixed-Lag Transformer V2.5
+
+V2.5 increases the neural contribution without relaxing V2.4's fixed 96-hour
+lag or hard 24-hour attention window. Transformer depth increases from one to
+two blocks and the feed-forward width from 256 to 320. The linear image scale
+head becomes a 96-wide MLP, its scale limit increases from 15% to 30%, and the
+initial gate increases from 18% to 40%. Small nonzero head initialization sends
+gradients into both encoders on the first step.
+
+Regularization is reduced in a controlled way: image dropout is 10%, time
+masking is 2%, residual L2 is `0.0005`, and EMA decay is `0.99`. The learning
+rate is `1e-4`. The parameter count is 953,520.
+
+A five-epoch, 256-row MPS smoke run completed without divergence. Its best
+checkpoint produced a full-validation RMSE of `75.242`, versus `75.426` for the
+matching V2.4 pipeline check. The mean image gate was `0.400`, mean absolute
+image scale was `0.506%`, and the image residual RMS was `0.869 km/s` after the
+first epoch. V2.4's scale at its smoke checkpoint was about `0.005%`, so V2.5
+successfully increases the deep image path's practical influence. Full CUDA
+training is still required to evaluate generalization.

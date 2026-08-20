@@ -497,3 +497,20 @@ bash scripts_taeukjung/run_baseline_v2_4_server_cuda.sh diagnose
 The default is 64 px with 672,240 parameters and writes to
 `/home/jovyan/outputs/baseline_v2_4_taeukjung`. See
 `MODEL_BASELINE_V2_4_taeukjung.md` for the fixed mapping and 128 px command.
+
+## Deep Fixed-Lag Transformer v2.5
+
+V2.5 retains V2.4's 96-hour lag and hard source-time window but gives the
+neural paths more capacity and influence. It uses two Transformer layers, a
+two-layer image-scale MLP, a 30% scale limit, a 40% initial image gate, small
+nonzero output-head initialization, and a higher learning rate.
+
+```bash
+bash scripts_taeukjung/run_baseline_v2_5_server_cuda.sh train
+bash scripts_taeukjung/run_baseline_v2_5_server_cuda.sh infer
+bash scripts_taeukjung/run_baseline_v2_5_server_cuda.sh diagnose
+```
+
+The default 64 px model has 953,520 parameters. See
+`MODEL_BASELINE_V2_5_taeukjung.md` for the controlled V2.4 comparison and the
+recommended 128 px command.
