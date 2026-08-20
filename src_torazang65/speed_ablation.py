@@ -62,6 +62,11 @@ SPEED_GROUP_LABELS = ("slow", "mid", "fast")
 SPEED_GROUP_COLORS = ("tab:blue", "tab:green", "tab:orange")
 BOOTSTRAP_ITERS = 10_000
 
+# 레짐 전환 정의: 향후 72h 최대 wind - 마지막 관측값이 이보다 크면 surge.
+# 이미지 gain이 surge 샘플에 집중된다는 것이 v1 분석의 핵심 발견이었다.
+SURGE_THRESHOLD_KMS = 100.0
+AU_KM = 1.496e8
+
 
 # ================================================================
 # 1. Prediction passes
@@ -90,6 +95,7 @@ def predict_collect(model, loader, zero_images=False):
         )
 
     predictions, targets, speeds, last_wind, sample_ids = [], [], [], [], []
+    transit_hours, prior_gate = [], []
     try:
         for batch in loader:
             images = batch["images"].to(DEVICE, non_blocking=PIN_MEMORY)
@@ -102,9 +108,24 @@ def predict_collect(model, loader, zero_images=False):
             speeds.append(batch["wind"].mean(dim=1).numpy() * 1000.0)
             last_wind.append(batch["wind"][:, -1].numpy() * 1000.0)
             sample_ids.extend(batch["sample_id"])
+            # v2 모델의 dynamic prior 스칼라 (v1 체크포인트에는 없음)
+            if getattr(model, "last_transit_hours", None) is not None:
+                transit_hours.append(
+                    model.last_transit_hours.float().cpu().numpy()
+                )
+                prior_gate.append(
+                    model.last_prior_gate.float().cpu().numpy()
+                )
     finally:
         if handle is not None:
             handle.remove()
+
+    extras = {}
+    if transit_hours:
+        extras["transit_hours"] = np.concatenate(transit_hours).astype(
+            np.float64
+        )
+        extras["prior_gate"] = np.concatenate(prior_gate).astype(np.float64)
 
     return (
         np.concatenate(predictions).astype(np.float64),
@@ -112,6 +133,7 @@ def predict_collect(model, loader, zero_images=False):
         np.concatenate(speeds).astype(np.float64),
         np.concatenate(last_wind).astype(np.float64),
         sample_ids,
+        extras,
     )
 
 
@@ -220,6 +242,45 @@ def run_analysis(pred_full, pred_wind, pred_persistence, targets, speeds):
     by_horizon = pd.DataFrame(horizon_rows)
     by_horizon.to_csv(ABLATION_DIR / "gain_by_horizon.csv", index=False)
 
+    # ---- surge 분해 (그룹 x {surge, quiet}) ----
+    # v1 분석의 핵심 발견: 이미지 gain은 레짐 전환(surge) 샘플에만
+    # 존재하고, quiet 샘플에서는 0이거나 음수였다 (fast & quiet -6.7
+    # = false positive 정황). v2가 고치려는 것이 정확히 이 패턴이다.
+    surge = targets.max(axis=1) - pred_persistence[:, 0]
+    surge_mask = surge > SURGE_THRESHOLD_KMS
+    surge_rows = []
+    for label, mask in groups.items():
+        for condition_label, condition in (
+            ("surge", surge_mask),
+            ("quiet", ~surge_mask),
+        ):
+            subset = mask & condition
+            n = int(subset.sum())
+            if n < 30:
+                continue
+            rmse_by_model = {
+                name: rmse(errors[subset]) for name, errors in se.items()
+            }
+            (ci_low, ci_high), p_nonpositive = paired_gain_bootstrap(
+                se["full"][subset].mean(axis=1),
+                se["wind_only"][subset].mean(axis=1),
+            )
+            surge_rows.append({
+                "group": label,
+                "condition": condition_label,
+                "count": n,
+                "rmse_full": rmse_by_model["full"],
+                "rmse_wind_only": rmse_by_model["wind_only"],
+                "rmse_persistence": rmse_by_model["persistence"],
+                "image_gain_km_s":
+                    rmse_by_model["wind_only"] - rmse_by_model["full"],
+                "ci_low": ci_low,
+                "ci_high": ci_high,
+                "p_nonpositive": p_nonpositive,
+            })
+    surge_gains = pd.DataFrame(surge_rows)
+    surge_gains.to_csv(ABLATION_DIR / "surge_gain.csv", index=False)
+
     # ---- 사용자 스케치 형태의 테이블 출력 ----
     order = [l for l in (*SPEED_GROUP_LABELS, "all")]
     rmse_pivot = summary.pivot(
@@ -242,11 +303,74 @@ def run_analysis(pred_full, pred_wind, pred_persistence, targets, speeds):
             f"P(gain<=0)={row.p_nonpositive:.3f}, n={int(row['count'])})"
         )
 
+    print(
+        f"\n=== image gain by surge condition "
+        f"(surge = future max - last > {SURGE_THRESHOLD_KMS:.0f} km/s) ==="
+    )
+    for _, row in surge_gains.iterrows():
+        print(
+            f"  {row.group:5s} {row.condition:5s}: "
+            f"gain {row.image_gain_km_s:+7.2f} "
+            f"[{row.ci_low:+7.2f}, {row.ci_high:+7.2f}]  "
+            f"P(gain<=0)={row.p_nonpositive:.3f}  n={int(row['count'])}"
+        )
+
     # ---- plots ----
     plot_gain_bars(gains)
     plot_gain_by_horizon(by_horizon)
 
-    return summary, gains, by_horizon
+    return summary, gains, by_horizon, surge_gains
+
+
+def prior_diagnostics(extras, targets, speeds, last_wind):
+    """v2 dynamic prior의 스칼라 검증 (attention 캡처 없이 판정).
+
+    - tau(z)가 미래 실측 wind가 함의하는 통과시간과 상관을 갖는가
+    - gate(z)가 surge 샘플에서 크고 quiet에서 작은가
+    """
+    if "transit_hours" not in extras:
+        print("\n(dynamic prior 스칼라 없음 -- v1 체크포인트)")
+        return None
+
+    tau = extras["transit_hours"]
+    gate = extras["prior_gate"]
+    future_mean = targets.mean(axis=1)
+    implied_transit = AU_KM / future_mean / 3600.0
+    surge = targets.max(axis=1) - last_wind
+    surge_mask = surge > SURGE_THRESHOLD_KMS
+
+    corr_tau = float(np.corrcoef(tau, implied_transit)[0, 1])
+    corr_tau_current = float(np.corrcoef(tau, AU_KM / speeds / 3600.0)[0, 1])
+
+    print("\n=== dynamic prior diagnostics ===")
+    print(
+        f"tau(z): mean {tau.mean():.1f}h, std {tau.std():.1f}h, "
+        f"range [{tau.min():.1f}, {tau.max():.1f}]"
+    )
+    print(
+        f"  corr(tau, 미래 wind 함의 통과시간) = {corr_tau:+.3f}  "
+        "(이론대로면 양수)"
+    )
+    print(
+        f"  corr(tau, 현재 wind 함의 통과시간) = {corr_tau_current:+.3f}  "
+        "(미래 상관이 더 크면 이미지에서 '앞으로 올 것'을 읽는다는 증거)"
+    )
+    print(
+        f"gate(z): surge 평균 {gate[surge_mask].mean():.3f} vs "
+        f"quiet 평균 {gate[~surge_mask].mean():.3f}  "
+        "(surge에서 크면 도래 이벤트 감지로 해석)"
+    )
+    if gate.std() < 1e-6:
+        print("  경고: gate 분산이 0에 가까움 -- prior가 상수로 남아 있음")
+
+    frame = pd.DataFrame({
+        "tau_hours": tau,
+        "gate": gate,
+        "implied_transit_hours": implied_transit,
+        "surge_km_s": surge,
+    })
+    frame.to_csv(ABLATION_DIR / "prior_diagnostics.csv", index=False)
+    return frame
 
 
 # ================================================================
@@ -307,11 +431,11 @@ if __name__ == "__main__":
         raise SystemExit("use_images=False 모델은 ablation 대상이 아님")
 
     print("\n[full model pass]")
-    pred_full, targets, speeds, last_wind, sample_ids = predict_collect(
-        model, val_loader, zero_images=False
+    pred_full, targets, speeds, last_wind, sample_ids, extras = (
+        predict_collect(model, val_loader, zero_images=False)
     )
     print("[wind-only pass (image tokens zeroed)]")
-    pred_wind, targets_check, _, _, ids_check = predict_collect(
+    pred_wind, targets_check, _, _, ids_check, _ = predict_collect(
         model, val_loader, zero_images=True
     )
     # 두 pass가 같은 순서/샘플이라는 sanity check
@@ -328,7 +452,9 @@ if __name__ == "__main__":
         targets=targets,
         speed_kms=speeds,
         sample_ids=np.asarray(sample_ids),
+        **extras,
     )
 
     run_analysis(pred_full, pred_wind, pred_persistence, targets, speeds)
+    prior_diagnostics(extras, targets, speeds, last_wind)
     print(f"\nsaved to: {ABLATION_DIR.resolve()}")

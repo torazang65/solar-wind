@@ -1,5 +1,6 @@
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 
 def conv_block(in_channels, out_channels, kernel_size, padding=0):
@@ -172,21 +173,38 @@ class SolarWindBaseline(nn.Module):
 
         # -> one image token per timestep
         #
-        # The input is 128-dim because forward() global-average-pools
-        # the CNN's 4x4 spatial grid before this projection. The
-        # previous flatten+Linear(2048 -> d_model) preserved
-        # per-position features, which let the model fingerprint
-        # individual frames (each reused by ~20 overlapping windows)
-        # and memorize their targets -- that single layer held ~30%
-        # of all parameters. The trade-off is real: disk position of
-        # coronal features does matter physically (a central coronal
-        # hole is Earth-directed, a limb one is not), so if
-        # overfitting stops but the image contribution shrinks, a
-        # 2x2 pooled middle ground is the next thing to try.
+        # 2x4 (lat x lon) pooled middle ground between two extremes:
+        #
+        #   flatten + Linear(2048 -> d_model): kept per-position
+        #     features but that single layer held ~30% of all
+        #     parameters and let the model fingerprint individual
+        #     frames (each reused by ~20 overlapping windows).
+        #   global average pool + Linear(128 -> d_model): stopped the
+        #     memorization but destroyed disk position entirely --
+        #     and the speed_ablation analysis showed the image
+        #     pathway's whole value is detecting incoming streams,
+        #     for which the source's distance from the central
+        #     meridian is the decisive variable (central =
+        #     Earth-directed, limb = misses us).
+        #
+        # The pooling is deliberately anisotropic. A symmetric 2x2
+        # has no center cell: a central coronal hole smears across
+        # all four quadrants and central-vs-limb contrast is weak --
+        # yet that is the axis that matters. 2x4 keeps the CNN's
+        # full longitude resolution (4 columns = E-limb, E-center,
+        # W-center, W-limb; solar rotation carries features east to
+        # west, so longitude also encodes time-to-Earth-facing) and
+        # folds only latitude to 2 rows (hemisphere info survives).
+        #
+        # Projection is 1024 -> d_model (~131k weights): half the
+        # old flatten layer, and the time_mask / modality_drop
+        # regularizers guard the reopened capacity. AdaptiveAvgPool
+        # keeps the projection independent of image_size.
         #
         # No LayerNorm here: normalization happens once per token,
         # after the positional/modality embeddings have been added.
-        self.image_projection = nn.Linear(128, d_model)
+        self.spatial_pool = nn.AdaptiveAvgPool3d((None, 2, 4))
+        self.image_projection = nn.Linear(128 * 2 * 4, d_model)
 
         # ============================================================
         # 2. Wind embedding
@@ -305,6 +323,85 @@ class SolarWindBaseline(nn.Module):
         )
 
         # ============================================================
+        # 6.5 Dynamic temporal prior (image-conditioned)
+        # ============================================================
+        # The attention analysis showed the decoder's temporal prior
+        # is a fixed per-horizon template: cross-attention Q is the
+        # same for every sample (future_queries is a bare parameter,
+        # and with a 1-layer decoder nothing upstream of the first
+        # cross-attention depends on the input), so which image AGE a
+        # horizon looks at cannot adapt to the sample. The
+        # speed_ablation analysis showed the image pathway's entire
+        # value is detecting incoming high-speed streams -- an
+        # image-content question -- so the prior should be driven by
+        # a solar-state latent read from the images, not by wind.
+        #
+        # Parameterization: one scalar transit time per sample,
+        #
+        #   tau(z)  in [48, 120]h   (1 AU at 800..300 km/s)
+        #   mu_h    = clip(tau - h, 0, 114)   expected image age
+        #   B(h,t)  = -gate(z) * (age_t - mu_h)^2 / (2 sigma^2)
+        #
+        # added to the cross-attention logits over the IMAGE half of
+        # memory (wind half gets 0). tau alone fixes all 12 mu_h with
+        # the physically forced slope of -1 hour per horizon hour, so
+        # the image head has to learn only "how fast is the incoming
+        # wind" -- a single interpretable scalar. gate(z) >= 0 lets
+        # the prior switch off on quiet samples (no incoming source
+        # detected); at gate=0 the model reduces exactly to the
+        # previous architecture, so the worst case is the status quo.
+        #
+        # Content attention (QK) stays untouched: the prior only
+        # moves WHERE to look, the matching of WHAT stays free.
+        #
+        # The state is computed from the image tokens AFTER the
+        # masking augmentations, so when modality dropout zeroes the
+        # image stream the state input is zero as well and the prior
+        # degrades to a learned constant -- the wind-only pathway
+        # regularization keeps working, and the image_projection
+        # zero-out ablation in speed_ablation.py covers this path
+        # automatically.
+        #
+        # Zero-init: transit head starts at tau=84h (mid-range) and
+        # the gate bias at -4 (softplus -> 0.018, prior effectively
+        # off), so training starts from the current architecture and
+        # has to earn the prior.
+        # ============================================================
+
+        self.nhead = nhead
+
+        self.register_buffer(
+            "image_age_hours",
+            torch.arange(19, -1, -1, dtype=torch.float32) * 6.0,
+        )
+        self.register_buffer(
+            "horizon_hours",
+            torch.arange(1, 13, dtype=torch.float32) * 6.0,
+        )
+
+        # mean over time = what sources are on disk;
+        # last5 - first5 = how they developed (growth / rotation
+        # toward the central meridian across the 5-day window).
+        self.solar_state_mlp = nn.Sequential(
+            nn.Linear(2 * d_model, 64),
+            nn.GELU(),
+        )
+        self.transit_head = nn.Linear(64, 1)
+        self.prior_gate_head = nn.Linear(64, 1)
+        self.log_prior_sigma = nn.Parameter(
+            torch.log(torch.tensor(24.0))
+        )
+
+        nn.init.zeros_(self.transit_head.weight)
+        nn.init.zeros_(self.transit_head.bias)
+        nn.init.zeros_(self.prior_gate_head.weight)
+        nn.init.constant_(self.prior_gate_head.bias, -4.0)
+
+        # 분석용: 마지막 forward의 tau(z)/gate(z) (B,) detached.
+        self.last_transit_hours = None
+        self.last_prior_gate = None
+
+        # ============================================================
         # 7. Prediction head
         # ============================================================
         #
@@ -374,14 +471,17 @@ class SolarWindBaseline(nn.Module):
             #
             # (B, 128, 20, 4, 4)
 
-            # global average pool over the spatial grid, then move
-            # the time dimension:
+            # pool the spatial grid to 2x4 (full longitude columns
+            # survive, latitude folds to hemispheres), then move the
+            # time dimension and flatten:
             #
-            # (B, 128, 20) -> (B, 20, 128)
-            image_features = image_features.mean(dim=(3, 4))
-            image_features = image_features.transpose(1, 2)
+            # (B, 128, 20, 2, 4) -> (B, 20, 1024)
+            image_features = self.spatial_pool(image_features)
+            image_features = image_features.permute(
+                0, 2, 1, 3, 4
+            ).flatten(2)
 
-            # (B,20,128)
+            # (B,20,1024)
             #       ↓
             # (B,20,d_model)
             image_tokens = self.image_projection(
@@ -419,10 +519,66 @@ class SolarWindBaseline(nn.Module):
                     >= self.modality_drop_prob
                 )
                 image_tokens = image_tokens * keep
+
+            # ========================================================
+            # SOLAR-STATE LATENT -> DYNAMIC TEMPORAL PRIOR
+            # ========================================================
+            # Computed from the post-mask tokens so a dropped image
+            # stream produces a zero state (see section 6.5).
+            #
+            # solar_state: (B, 64)
+            # transit:     (B, 1)   in [48, 120] hours
+            # gate:        (B, 1)   >= 0
+            # mu:          (B, 12)  expected image age per horizon
+            # prior_bias:  (B, 12, 40)  image half biased, wind half 0
+            # ========================================================
+
+            solar_state = self.solar_state_mlp(
+                torch.cat(
+                    [
+                        image_tokens.mean(dim=1),
+                        image_tokens[:, -5:].mean(dim=1)
+                        - image_tokens[:, :5].mean(dim=1),
+                    ],
+                    dim=-1,
+                )
+            )
+
+            transit = 48.0 + 72.0 * torch.sigmoid(
+                self.transit_head(solar_state)
+            )
+            gate = F.softplus(self.prior_gate_head(solar_state))
+
+            mu = (transit - self.horizon_hours).clamp(
+                0.0, float(self.image_age_hours[0])
+            )
+
+            sigma = self.log_prior_sigma.exp()
+            prior_bias = (
+                -gate.unsqueeze(-1)
+                * (self.image_age_hours[None, None, :] - mu[:, :, None]) ** 2
+                / (2.0 * sigma**2)
+            )
+            prior_bias = torch.cat(
+                [prior_bias, torch.zeros_like(prior_bias)],
+                dim=-1,
+            )
+
+            # nn.MultiheadAttention adds a float attn_mask to the
+            # logits and accepts (B * nhead, L, S).
+            memory_mask = prior_bias.repeat_interleave(
+                self.nhead, dim=0
+            )
+
+            self.last_transit_hours = transit.detach().squeeze(-1)
+            self.last_prior_gate = gate.detach().squeeze(-1)
         else:
             # wind-only diagnostic: skip the CNN and drop the image
             # stream entirely -- the encoder runs on wind tokens only.
             image_tokens = None
+            memory_mask = None
+            self.last_transit_hours = None
+            self.last_prior_gate = None
 
         # ============================================================
         # MULTIMODAL SEQUENCE
@@ -503,11 +659,16 @@ class SolarWindBaseline(nn.Module):
         # All 12 are predicted simultaneously.
         # NO autoregressive loop.
         # NO teacher forcing.
+        #
+        # memory_mask carries the image-conditioned temporal prior
+        # (section 6.5) into every cross-attention as an additive
+        # logit bias; None in wind-only mode.
         # ============================================================
 
         decoded = self.transformer_decoder(
             tgt=queries,
             memory=memory,
+            memory_mask=memory_mask,
         )
 
         # decoded:
