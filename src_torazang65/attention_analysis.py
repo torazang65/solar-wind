@@ -512,6 +512,11 @@ if __name__ == "__main__":
     model = load_best_model()
     if not model.use_images:
         raise SystemExit("use_images=False 모델은 이미지 attention 분석 대상이 아님")
+    if not getattr(model, "use_correction", True):
+        raise SystemExit(
+            "use_correction=False(v6a) 모델은 encoder/decoder가 없어 "
+            "attention 분석 대상이 아님 -- branch_decomposition을 쓸 것"
+        )
 
     # 속도 3분위 경계 (검증셋 입력 wind 평균, km/s)
     val_speed_kms = val_dataset.wind.mean(axis=1) * 1000.0
