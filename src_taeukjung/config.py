@@ -50,6 +50,29 @@ TRANSFORMER_KWARGS = {
     "dropout": 0.1,
 }
 
+TILE_TRANSFORMER_KWARGS = {
+    "tile_grid_size": int(os.getenv("TILE_GRID_SIZE", "8")),
+    "d_model": int(os.getenv("TILE_D_MODEL", "128")),
+    "wind_dim": int(os.getenv("TILE_WIND_DIM", "32")),
+    "nhead": int(os.getenv("TILE_NHEAD", "8")),
+    "encoder_layers": int(os.getenv("TILE_ENCODER_LAYERS", "2")),
+    "ff_dim": int(os.getenv("TILE_FF_DIM", "256")),
+    "dropout": float(os.getenv("TILE_DROPOUT", "0.1")),
+}
+TILE_TRANSFORMER_LR = float(os.getenv("LEARNING_RATE", "3e-4"))
+
+SOLAR_PROBABILISTIC_KWARGS = {
+    "d_model": int(os.getenv("SOLAR_D_MODEL", "96")),
+    "wind_dim": int(os.getenv("SOLAR_WIND_DIM", "24")),
+    "nhead": int(os.getenv("SOLAR_NHEAD", "8")),
+    "encoder_layers": int(os.getenv("SOLAR_ENCODER_LAYERS", "1")),
+    "ff_dim": int(os.getenv("SOLAR_FF_DIM", "192")),
+    "dropout": float(os.getenv("SOLAR_DROPOUT", "0.15")),
+    "distribution_rank": int(os.getenv("DISTRIBUTION_RANK", "3")),
+}
+SOLAR_PROBABILISTIC_LR = float(os.getenv("LEARNING_RATE", "2e-4"))
+PROBABILISTIC_NLL_WEIGHT = float(os.getenv("PROBABILISTIC_NLL_WEIGHT", "5.0"))
+
 # ==========================================
 # 5. Device Setup
 # ==========================================
