@@ -31,8 +31,8 @@ print(f"파라미터 수: {sum(p.numel() for p in model.parameters())/1e6:.2f}M"
 
 # v5a: 물리 스칼라 전용 param group. AdamW의 스텝 크기는 gradient
 # 스케일과 무관하게 ~lr이라, 총 이동 예산이 sum(lr) ~= 0.1 수준이다.
-# 자연 스케일이 O(1)~O(10)인 스칼라(reversion logit -4->0, gate bias
-# -2->0, dist_eff raw 등)는 base lr로는 초기값에 얼어붙는다 -- v2/v3
+# 자연 스케일이 O(1)~O(10)인 스칼라(reversion logit -4->0, dist_eff raw
+# 등)는 base lr로는 초기값에 얼어붙는다 -- v2/v3
 # prior gate(-4)가 유인과 무관하게 기계적으로 못 열린 원인이기도
 # 하다 (v3의 tau 이동 관측치 ~0.4h가 이 예산과 정량 일치). 100x lr,
 # weight decay 0 (decay가 물리 상수를 0으로 끌어당기지 않도록).
@@ -42,7 +42,6 @@ def is_physical_param(name):
             "dist_eff_raw", "reversion_logit",
             "climatology", "fallback_weight_raw",
         }
-        or name.startswith("fusion_gate_head.")
         or name in {
             "source_speed_head.bias", "source_gate_head.bias",
             "transit_residual_head.bias",
@@ -86,10 +85,10 @@ checkpoint_path = RUN_DIR / "best_model.pth"
 if checkpoint_path.exists():
     checkpoint_path.unlink()
 
-# cosine은 개선이 후반 tail에서 잘게 오는데 val이 이벤트 주도로 ±10씩
-# 널뛰므로, 12로는 스케줄이 끝나기 전에 끊길 위험이 있어 여유를 둔다.
-# 에폭당 ~17초라 늘려도 비용은 미미하다.
-patience = 20
+# v6b: EPOCHS(35)의 cosine tail을 관측할 수 있도록 patience도 config와
+# 함께 관리한다. v6a의 20은 100-epoch schedule에는 너무 짧아 peak lr
+# 근처에서 중단됐다.
+patience = EARLY_STOPPING_PATIENCE
 best_val_rmse = float("inf")
 epochs_without_improvement = 0
 history = []
