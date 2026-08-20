@@ -170,6 +170,7 @@ def main(
     temporal_entropy = []
     spatial_entropy = []
     gates = []
+    image_scales = []
     transit = []
     memories = []
     first_preprocess = None
@@ -201,6 +202,10 @@ def main(
             diagnostics["attention_spatial_entropy"].float().cpu().numpy()
         )
         gates.append(diagnostics["image_gate"].float().cpu().numpy())
+        if "image_scale_fraction" in diagnostics:
+            image_scales.append(
+                diagnostics["image_scale_fraction"].float().cpu().numpy()
+            )
         transit.append(
             diagnostics["nominal_transit_hours"].float().cpu().numpy()
         )
@@ -230,6 +235,8 @@ def main(
     temporal_entropy = np.concatenate(temporal_entropy)
     spatial_entropy = np.concatenate(spatial_entropy)
     gates = np.concatenate(gates)
+    if image_scales:
+        image_scales = np.concatenate(image_scales)
     transit = np.concatenate(transit)
     memories = np.concatenate(memories)
 
@@ -275,15 +282,27 @@ def main(
         index=[f"horizon_{hour:02d}h" for hour in range(6, 73, 6)],
         columns=[f"cell_{index:02d}" for index in range(model.memory_spatial_tokens)],
     ).to_csv(diagnostic_dir / "spatial_attention_mean.csv")
-    pd.DataFrame(
-        {
-            "horizon_hours": np.arange(1, 13) * 6,
-            "expected_image_age_hours": expected_age.mean(axis=0),
-            "temporal_attention_entropy": temporal_entropy.mean(axis=0),
-            "spatial_attention_entropy": spatial_entropy.mean(axis=0),
-            "image_gate": gates.mean(axis=0),
-        }
-    ).to_csv(diagnostic_dir / "horizon_summary.csv", index=False)
+    horizon_summary = {
+        "horizon_hours": np.arange(1, 13) * 6,
+        "expected_image_age_hours": expected_age.mean(axis=0),
+        "temporal_attention_entropy": temporal_entropy.mean(axis=0),
+        "spatial_attention_entropy": spatial_entropy.mean(axis=0),
+        "image_gate": gates.mean(axis=0),
+    }
+    if hasattr(model, "fixed_lag_hours"):
+        horizon_summary["fixed_source_age_hours"] = (
+            model.fixed_lag_hours - np.arange(1, 13) * 6
+        )
+    if len(image_scales):
+        horizon_summary["mean_image_scale_percent"] = (
+            image_scales.mean(axis=0) * 100.0
+        )
+        horizon_summary["mean_absolute_image_scale_percent"] = (
+            np.abs(image_scales).mean(axis=0) * 100.0
+        )
+    pd.DataFrame(horizon_summary).to_csv(
+        diagnostic_dir / "horizon_summary.csv", index=False
+    )
 
     summary = {
         "sample_count": int(len(predictions)),
@@ -296,6 +315,18 @@ def main(
         "encoder_attention_score_count_per_head": model.encoder_attention_score_count(),
         **representation,
     }
+    if hasattr(model, "fixed_lag_hours"):
+        summary.update(
+            {
+                "fixed_lag_hours": model.fixed_lag_hours,
+                "fixed_lag_sigma_hours": model.fixed_lag_sigma_hours,
+                "fixed_lag_window_hours": model.fixed_lag_window_hours,
+            }
+        )
+    if len(image_scales):
+        summary["mean_absolute_image_scale_percent"] = float(
+            np.abs(image_scales).mean() * 100.0
+        )
     (diagnostic_dir / "summary.json").write_text(
         json.dumps(summary, indent=2) + "\n", encoding="utf-8"
     )

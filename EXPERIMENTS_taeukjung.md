@@ -369,3 +369,30 @@ A 256-row MPS smoke run completed training, strict checkpoint reload, full
 validation/test inference, submission generation, and diagnostics. Its full
 validation RMSE of `75.411` is a pipeline check rather than a model result. The
 next decision point is the complete default 64 px CUDA run.
+
+## Fixed-Lag Attentive Magnitude Transformer V2.4
+
+V2.4 tests the hypothesis that prior Transformer variants failed mainly at
+unlabeled image-to-arrival time assignment. Literature on coronal-hole wind
+forecasting supports a three-to-four-day transit interval and frequently uses
+a fixed four-day speed lag. In this dataset, a 96-hour lag maps the 12 forecast
+horizons exactly to `image_04` through `image_15`.
+
+The cross-attention center is fixed at `96 h - forecast_horizon`, with a 12-hour
+Gaussian sigma and a hard 24-hour window. Spatial attention remains global
+within each 4 by 4 image grid, and temporal self-attention is restricted to a
+12-hour local neighborhood. A weak central-disk prior reflects the empirical
+importance of low-latitude, central-meridian coronal-hole area.
+
+The image head now predicts at most a 15% multiplicative speed adjustment to
+the AR-neural wind curve. It no longer creates a free additive forecast. The
+adjustment is additionally bounded by the per-horizon AR residual scale and
+starts at exactly zero.
+
+Local verification showed mean attention ages within 0.10 hours of all fixed
+source ages, temporal-attention entropy of about `0.674`, and no collapsed
+features. A 256-row, four-epoch MPS smoke checkpoint completed strict reload,
+full validation/test inference, `(3868, 13)` submission generation, and all
+diagnostics. Its full validation RMSE was `75.426`; this is not a performance
+estimate. The next decision point is the complete 64 px CUDA run, followed by
+a controlled 128 px run if the fixed-lag hypothesis improves validation.

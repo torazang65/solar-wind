@@ -21,9 +21,12 @@ from model_baseline_v2_3 import SolarWindARNeuralTransformerV23
 from train_solar_physics_v5 import main
 
 
-def fit_ar_configuration():
-    order = int(os.getenv("V23_AR_ORDER", "2"))
-    ridge_strength = float(os.getenv("V23_AR_RIDGE", "30"))
+def fit_ar_configuration(
+    order_environment="V23_AR_ORDER",
+    ridge_environment="V23_AR_RIDGE",
+):
+    order = int(os.getenv(order_environment, "2"))
+    ridge_strength = float(os.getenv(ridge_environment, "30"))
     train_chains = infer_temporal_chains(train_inputs, IMAGE_COLUMNS)
     val_chains = infer_temporal_chains(val_inputs, IMAGE_COLUMNS)
     fit = fit_global_ar(

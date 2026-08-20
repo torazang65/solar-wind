@@ -477,3 +477,23 @@ bash scripts_taeukjung/run_baseline_v2_3_server_cuda.sh diagnose
 The default is 64 px with 672,240 parameters. Outputs go to
 `/home/jovyan/outputs/baseline_v2_3_taeukjung`. See
 `MODEL_BASELINE_V2_3_taeukjung.md` for the architecture and leakage controls.
+
+## Fixed-Lag Attentive Magnitude Transformer v2.4
+
+V2.4 addresses the missing image-to-wind time labels by fixing the empirical
+four-day solar-wind lag. Forecast cross-attention is centered on the mapped
+source image and hard-limited to a 24-hour neighborhood. Spatial and local
+temporal attention remain active inside that physically plausible region.
+
+The image path predicts only a bounded percentage adjustment to the V2.3
+AR-neural wind forecast, rather than generating an independent forecast curve.
+
+```bash
+bash scripts_taeukjung/run_baseline_v2_4_server_cuda.sh train
+bash scripts_taeukjung/run_baseline_v2_4_server_cuda.sh infer
+bash scripts_taeukjung/run_baseline_v2_4_server_cuda.sh diagnose
+```
+
+The default is 64 px with 672,240 parameters and writes to
+`/home/jovyan/outputs/baseline_v2_4_taeukjung`. See
+`MODEL_BASELINE_V2_4_taeukjung.md` for the fixed mapping and 128 px command.
