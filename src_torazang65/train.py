@@ -54,51 +54,133 @@ best_val_rmse = float("inf")
 epochs_without_improvement = 0
 history = []
 
-def run_epoch(loader, training):
+def run_epoch(loader, training, hindcast_lambda):
     model.train(training)
     squared_error_sum = 0.0
     value_count = 0
+    hindcast_squared_error_sum = 0.0
+    hindcast_value_count = 0.0
     for batch in loader:
         images = batch["images"].to(DEVICE, non_blocking=PIN_MEMORY)
         wind = batch["wind"].to(DEVICE, non_blocking=PIN_MEMORY)
         target = batch["target"].to(DEVICE, non_blocking=PIN_MEMORY)
-        
+
         if training:
             optimizer.zero_grad(set_to_none=True)
-            
+
         with torch.set_grad_enabled(training):
             with torch.amp.autocast(DEVICE.type, enabled=USE_AMP):
-                prediction = model(images, wind)
+                prediction, aux = model(images, wind, return_aux=True)
                 mse = F.mse_loss(prediction, target)
                 loss = torch.sqrt(mse + RMSE_EPSILON)
+                # v5a hindcast: 이미지 전용 전파 branch가 관측된 최근
+                # 13개 wind(s=-72..0h = wind[:, 7:])를 재구성한다.
+                # target은 관측값 그 자체 -- correspondence label이
+                # 아니라 고정 시점 재구성이라 label 없이 성립한다.
+                # 배정(어느 이미지가 어느 시점 기여)은 모델의
+                # (tau_t, p_t)가 kernel로 암묵 수행. wind persistence
+                # 지름길이 없는 경로의 supervision이라는 점이 v2/v3
+                # prior 사멸의 해법이다. modality drop된 샘플
+                # (image_keep=0)은 상수 재구성이라 제외.
+                if aux["hindcast"] is not None:
+                    hindcast_target = wind[:, 7:]
+                    keep = aux["image_keep"].unsqueeze(-1)
+                    kept_values = (
+                        keep.sum() * hindcast_target.size(1)
+                    ).clamp(min=1.0)
+                    hindcast_mse = (
+                        (aux["hindcast"] - hindcast_target) ** 2 * keep
+                    ).sum() / kept_values
+                    loss = loss + hindcast_lambda * torch.sqrt(
+                        hindcast_mse + RMSE_EPSILON
+                    )
+                    # ballistic 잔차(tanh 출력 = delta/24h)의 L2:
+                    # tau를 backbone 근방에 잡아둔다 (자유 tau의
+                    # "값을 아무 시점에나 배치" 퇴화 방지).
+                    loss = loss + TRANSIT_RESIDUAL_L2 * (
+                        aux["transit_residual"] ** 2
+                    ).mean()
             if training:
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
                 scaler.update()
-                
+
         error_km_s = (prediction.detach() - target) * 1000.0
         squared_error_sum += float(torch.sum(error_km_s ** 2).cpu())
         value_count += error_km_s.numel()
-        
-    return math.sqrt(squared_error_sum / value_count)
+        # mechanism 지표: hindcast RMSE (km/s). val RMSE가 노이즈에
+        # 묻혀도 전파 branch가 학습되는지 이 값으로 판정한다 --
+        # climatology(std_val ~= 90)보다 유의미하게 낮아져야 한다.
+        if aux["hindcast"] is not None:
+            keep = aux["image_keep"].unsqueeze(-1)
+            hindcast_error_km_s = (
+                aux["hindcast"].detach() - wind[:, 7:]
+            ) * 1000.0
+            hindcast_squared_error_sum += float(
+                (hindcast_error_km_s ** 2 * keep).sum().cpu()
+            )
+            hindcast_value_count += float(
+                (keep.sum() * hindcast_error_km_s.size(1)).cpu()
+            )
+
+    forecast_rmse = math.sqrt(squared_error_sum / value_count)
+    hindcast_rmse = (
+        math.sqrt(hindcast_squared_error_sum / hindcast_value_count)
+        if hindcast_value_count > 0
+        else float("nan")
+    )
+    return forecast_rmse, hindcast_rmse
 
 if __name__ == "__main__":
     for epoch in range(1, EPOCHS + 1):
         started = time.perf_counter()
-        train_rmse = run_epoch(train_loader, training=True)
+        # hindcast 가중치 curriculum: 초반에 크게(이미지 시간 정렬부터
+        # 굳힘) -> 선형 감쇠 후 고정. 스윕하지 않는 고정 기본값.
+        decay_progress = min(
+            1.0, (epoch - 1) / HINDCAST_LAMBDA_DECAY_EPOCHS
+        )
+        hindcast_lambda = (
+            HINDCAST_LAMBDA_START
+            + (HINDCAST_LAMBDA_END - HINDCAST_LAMBDA_START)
+            * decay_progress
+        )
+        train_rmse, train_hindcast_rmse = run_epoch(
+            train_loader, training=True, hindcast_lambda=hindcast_lambda
+        )
         with torch.no_grad():
-            val_rmse = run_epoch(val_loader, training=False)
-            
+            val_rmse, val_hindcast_rmse = run_epoch(
+                val_loader, training=False, hindcast_lambda=hindcast_lambda
+            )
+
         # 이번 에폭이 실제로 쓴 lr을 기록한 뒤 다음 에폭 값으로 step.
         learning_rate = optimizer.param_groups[0]["lr"]
         scheduler.step()
         elapsed = time.perf_counter() - started
-        
+
+        # mechanism 지표. beta_h: persistence의 climatology 복귀율
+        # (h 단조 증가가 기대 방향). alpha: 전파 branch 신뢰도 (마지막
+        # val 배치의 평균 -- 대략적 추이 관찰용).
+        beta_mean = float(torch.sigmoid(model.reversion_logit).mean())
+        alpha_mean = (
+            float(model.last_fusion_alpha.mean())
+            if model.last_fusion_alpha is not None
+            else float("nan")
+        )
+
         history.append({
             "epoch": epoch, "train_rmse_km_s": train_rmse,
-            "val_rmse_km_s": val_rmse, "learning_rate": learning_rate, "seconds": elapsed,
+            "val_rmse_km_s": val_rmse,
+            "train_hindcast_rmse_km_s": train_hindcast_rmse,
+            "val_hindcast_rmse_km_s": val_hindcast_rmse,
+            "hindcast_lambda": hindcast_lambda,
+            "alpha_mean": alpha_mean, "beta_mean": beta_mean,
+            "learning_rate": learning_rate, "seconds": elapsed,
         })
-        print(f"epoch={epoch:03d} train_rmse={train_rmse:.3f} val_rmse={val_rmse:.3f} lr={learning_rate:.2e} seconds={elapsed:.1f}")
+        print(
+            f"epoch={epoch:03d} train_rmse={train_rmse:.3f} val_rmse={val_rmse:.3f}"
+            f" hind={val_hindcast_rmse:.1f} alpha={alpha_mean:.3f} beta={beta_mean:.3f}"
+            f" lr={learning_rate:.2e} seconds={elapsed:.1f}"
+        )
         
         if val_rmse < best_val_rmse:
             best_val_rmse = val_rmse

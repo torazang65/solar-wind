@@ -24,7 +24,7 @@ if torch.cuda.is_available():
 DATA_ROOT = Path("public_dataset/competition_dataset_6h")
 # train.py가 시작 시 기존 best_model.pth를 지우므로, 런이 바뀔 때마다
 # 이름을 올려 이전 산출물을 보존한다.
-OUTPUT_DIR = Path(f"outputs/transformer_v4_diffchan_torazang65_seed{SEED}")
+OUTPUT_DIR = Path(f"outputs/transformer_v5a_propagation_torazang65_seed{SEED}")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 CACHE_DIR = Path("outputs/cache")
 
@@ -48,6 +48,20 @@ NUM_WORKERS = 4
 PEAK_LR = 3e-5
 MIN_LR = 1e-6
 WARMUP_EPOCHS = 3
+
+# ---- v5a: propagation/hindcast 보조 손실 ----
+# hindcast: 이미지 전용 전파 branch(model.py 6.5)가 관측된 최근 wind
+# (s=-72..0h)를 재구성하는 손실. wind persistence 지름길이 없는 경로에
+# 시간 정렬 supervision을 두는 것이 v2/v3 prior 사멸의 해법. 초반에
+# 크게 시작해(정렬부터 학습) DECAY_EPOCHS에 걸쳐 END로 선형 감쇠.
+# 전부 스윕하지 않는 고정 기본값 -- mechanism 지표(hindcast RMSE,
+# alpha/beta 거동)가 학습을 확인한 뒤에만 튜닝 대상으로 승격한다.
+HINDCAST_LAMBDA_START = 1.0
+HINDCAST_LAMBDA_END = 0.3
+HINDCAST_LAMBDA_DECAY_EPOCHS = 20
+# ballistic 잔차(tanh 출력 = delta/24h)의 L2 계수. tau를 D_eff/s
+# backbone 근방에 잡아둬 "값을 아무 시점에나 배치"하는 퇴화를 막는다.
+TRANSIT_RESIDUAL_L2 = 3e-3
 
 # ==========================================
 # 3.5 Model architecture
@@ -78,9 +92,19 @@ WARMUP_EPOCHS = 3
 # v4 (diffchan): 입력에 running-difference 채널 추가 (193, 211, Δ193,
 # Δ211). CNN의 시간 커널이 전부 1이라 CME의 on-disk 신호(coronal
 # dimming/플레어 증광 = 프레임 간 픽셀 차분)를 모델이 스스로 만들 수
-# 없어 dataset.py에서 공급한다. 판정: 같은 스케줄인 v3 대비
-# surge/event 지표(surge gain, event RMSE, worst-15) + seed 2개 평균.
-# 전체 RMSE는 노이즈(±1.5)에 묻히므로 판정 기준이 아니다.
+# 없어 공급한다. Δ는 model.forward가 GPU에서 계산한다 -- dataset(CPU)
+# 계산은 DataLoader 배치 메모리를 2배로 만들어 pod OOM을 냈다. 호스트
+# RAM 프로필은 v3와 동일. 판정: 같은 스케줄인 v3 대비 surge/event
+# 지표(surge gain, event RMSE, worst-15) + seed 2개 평균. 전체 RMSE는
+# 노이즈(±1.5)에 묻히므로 판정 기준이 아니다.
+# v5a (propagation): dynamic prior(구 section 6.5)를 propagation
+# readout + persistence anchor + fusion gate로 교체 (파라미터 순감
+# ~14k). 입력 구성(4ch diff)은 v4 그대로 유지 -- 전파 thesis와
+# 독립이고 v5b(surge head)가 diff 정보를 쓸 예정. 이전 체크포인트와
+# 호환 안 됨. 판정: 멀티시드 >=2 + mechanism 지표 우선(hindcast RMSE
+# vs climatology, source speed-실측 상관, beta_h 단조성, alpha_h 레짐
+# 분포) -- val RMSE는 노이즈에 묻혀도 이 지표들로 구조 작동 여부를
+# 1런에 판정할 수 있다.
 MODEL_KWARGS = dict(
     d_model=128,
     nhead=8,
@@ -95,10 +119,10 @@ MODEL_KWARGS = dict(
     # wind-only 경로가 항상 자립하도록 강제해서 이미지 경로 암기를
     # 억제한다. 0이면 꺼짐. time_mask_prob와 함께 스윕 대상.
     modality_drop_prob=0.25,
-    # 2 = 원본 EUV 채널만 (v3까지), 4 = + running-diff 채널 (v4).
-    # dataset.py가 항상 4채널을 만들므로 2로 되돌리려면 dataset의
-    # 차분 concat도 함께 빼야 한다.
+    # stem 입력 채널. add_diff_channels=True면 원본 채널 수의 2배.
+    # v3 이전으로 되돌리려면 (2, False)로.
     image_in_channels=4,
+    add_diff_channels=True,
 )
 
 # ==========================================
