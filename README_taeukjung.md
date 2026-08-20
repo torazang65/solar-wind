@@ -354,3 +354,24 @@ bash scripts_taeukjung/run_solar_cnn_v6_server_cuda.sh infer
 V6 writes to `/home/jovyan/outputs/solar_cnn_v6_taeukjung`, so it cannot
 overwrite V3 or V5 checkpoints. Transformer findings and the proposed ablation
 order are recorded in `TRANSFORMER_REVIEW_taeukjung.md`.
+
+## Factorized Transformer v7
+
+V7 keeps every V6 component fixed except the encoder attention layout. Instead
+of flattening 20 timestamps and 8 longitudes into a length-160 sequence for
+each latitude, it applies attention over 8 longitude cells and then over 20
+timestamps. Both axes share the same multi-head-attention parameters, so V7 has
+only 192 more parameters than V6 while reducing encoder attention scores from
+102,400 to 17,920 per sample.
+
+Competition server CUDA:
+
+```bash
+git switch taeukjung
+git pull --ff-only origin taeukjung
+bash scripts_taeukjung/run_solar_factorized_v7_server_cuda.sh train
+bash scripts_taeukjung/run_solar_factorized_v7_server_cuda.sh infer
+```
+
+V7 defaults to 128 px and writes to the isolated
+`/home/jovyan/outputs/solar_factorized_v7_taeukjung` directory.

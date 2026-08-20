@@ -215,3 +215,22 @@ Local implementation checks:
 - real-data training with two DataLoader workers completed;
 - strict checkpoint loading, full validation inference, and a `(3868, 13)`
   submission completed from the smoke checkpoint.
+
+## V7 factorized attention
+
+V7 changes only V6's Transformer encoder. One shared MHA kernel first attends
+over 8 longitude cells independently for every timestamp and latitude, then
+attends over 20 timestamps independently for every latitude-longitude cell. A
+single feed-forward block follows both attention passes.
+
+| Property | V6 | V7 |
+| --- | ---: | ---: |
+| Parameters | 203,197 | 203,389 |
+| Encoder attention scores per sample | 102,400 | 17,920 |
+| 128 px MPS forward/backward | finite | finite |
+
+The parameter increase is only 192, while attention-score storage and work are
+reduced by a factor of 5.7. Real-data smoke training with two DataLoader workers,
+strict checkpoint reload, full validation inference, and `(3868, 13)` test
+submission generation all completed. The smoke checkpoint used only 32 training
+rows and is not a performance estimate.

@@ -79,3 +79,17 @@ corrections while limiting catastrophic extrapolation.
 3. V8: separate the 20 wind tokens from spatial image memory.
 4. Add bounded residual gating only after the first three ablations establish
    which representation generalizes.
+
+## V7 implementation status
+
+The factorized-attention experiment is implemented as V7. Longitude and time
+passes share one MHA kernel, keeping the comparison parameter-controlled:
+
+- V6 parameters: 203,197;
+- V7 parameters: 203,389;
+- parameter difference: 192;
+- V7 attention-score count: 17,920, matching the calculation above.
+
+V7 has passed 128 px MPS forward/backward and the complete local smoke pipeline.
+Its CUDA validation RMSE must be compared with V6 before proceeding to separate
+wind memory tokens.
