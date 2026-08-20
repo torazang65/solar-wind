@@ -28,11 +28,17 @@ from dataset import (
 from model_solar_physics_v5 import SolarWindPhysicsTransformerV5
 
 
-def load_best_model():
-    checkpoint_path = OUTPUT_DIR / "best_solar_physics_v5.pth"
+def load_best_model(
+    model_class=SolarWindPhysicsTransformerV5,
+    architecture_name="SolarWindPhysicsTransformerV5",
+    file_stem="solar_physics_v5",
+):
+    checkpoint_path = OUTPUT_DIR / f"best_{file_stem}.pth"
     checkpoint = torch.load(checkpoint_path, map_location=DEVICE, weights_only=True)
-    if checkpoint.get("architecture") != "SolarWindPhysicsTransformerV5":
-        raise ValueError(f"not a v5 checkpoint: {checkpoint.get('architecture')}")
+    if checkpoint.get("architecture") != architecture_name:
+        raise ValueError(
+            f"not a {architecture_name} checkpoint: {checkpoint.get('architecture')}"
+        )
 
     checkpoint_preprocess = checkpoint["preprocess"]
     current_preprocess = {
@@ -50,11 +56,11 @@ def load_best_model():
                 f"key={key}, current={value}, checkpoint={checkpoint_preprocess[key]}"
             )
 
-    model = SolarWindPhysicsTransformerV5(**checkpoint["model_kwargs"]).to(DEVICE)
+    model = model_class(**checkpoint["model_kwargs"]).to(DEVICE)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
     print(
-        f"loaded v5 best epoch={checkpoint['epoch']} "
+        f"loaded {file_stem} best epoch={checkpoint['epoch']} "
         f"val_rmse={checkpoint['val_rmse_km_s']:.3f} "
         f"val_chain_macro_rmse={checkpoint['val_chain_macro_rmse_km_s']:.3f} "
         f"image_size={checkpoint['model_kwargs']['image_size']} "
@@ -105,8 +111,12 @@ def metrics_by_horizon(y_true, y_pred):
     return pd.DataFrame(rows)
 
 
-def main():
-    model = load_best_model()
+def main(
+    model_class=SolarWindPhysicsTransformerV5,
+    architecture_name="SolarWindPhysicsTransformerV5",
+    file_stem="solar_physics_v5",
+):
+    model = load_best_model(model_class, architecture_name, file_stem)
     val_chains = infer_temporal_chains(val_inputs, IMAGE_COLUMNS)
     val_dataset = ChainAwareSolarWindDataset(
         val_image_array,
@@ -118,14 +128,14 @@ def main():
     )
     val_loader = make_chain_loader(val_dataset, training=False)
 
-    print("\n[Running V5 Validation Evaluation]")
+    print(f"\n[Running {file_stem} Validation Evaluation]")
     validation_prediction, _, chain_ids = predict(model, val_loader)
     validation_target = np.asarray(val_targets[val_index], dtype=np.float64)
     validation_metrics = metrics_by_horizon(
         validation_target, validation_prediction
     )
     validation_metrics.to_csv(
-        OUTPUT_DIR / "solar_physics_v5_validation_metrics.csv", index=False
+        OUTPUT_DIR / f"{file_stem}_validation_metrics.csv", index=False
     )
     squared_error = (validation_prediction - validation_target) ** 2
     overall_rmse = float(np.sqrt(np.mean(squared_error)))
@@ -145,7 +155,7 @@ def main():
     elif DEVICE.type == "mps":
         torch.mps.empty_cache()
 
-    print("\n[Running V5 Test Inference]")
+    print(f"\n[Running {file_stem} Test Inference]")
     test_dataset = SolarWindDataset(
         test_image_array,
         test_image_index,
@@ -157,7 +167,7 @@ def main():
     test_prediction, predicted_ids, _ = predict(model, test_loader)
     submission = pd.DataFrame(test_prediction, columns=TARGET_COLUMNS)
     submission.insert(0, "sample_id", predicted_ids)
-    submission_path = OUTPUT_DIR / "solar_physics_v5_submission.csv"
+    submission_path = OUTPUT_DIR / f"{file_stem}_submission.csv"
     submission.to_csv(submission_path, index=False)
     print(f"saved: {submission_path.resolve()}")
     print(f"shape: {submission.shape}")

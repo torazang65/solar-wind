@@ -194,3 +194,24 @@ Implementation checks completed locally:
   generation completed;
 - the smoke run used only 64 training and 32 validation rows and is therefore a
   pipeline test, not a performance estimate.
+
+The complete 128 px CUDA run reached its best validation RMSE of `71.228` at
+epoch 8 and stopped after epoch 16. Wind-only validation RMSE remained near 76,
+while image-residual RMS varied from 58 to 81 km/s. The fixed coronal-hole
+statistics therefore did not generalize as well as the learned V3 encoder.
+
+## V6 CNN restoration
+
+V6 changes only the V5 image representation: the fixed CEA cell statistics are
+removed and the complete V3 CEA CNN is restored. The chain-weighted baseline,
+chain-balanced sampler, causal wind branch, axial Transformer, objective, and
+optimizer remain unchanged. This makes the V5-to-V6 CUDA comparison an isolated
+test of learned morphology versus hand-designed statistics.
+
+Local implementation checks:
+
+- 203,197 parameters;
+- finite 128 px MPS forward and backward with output shape `(2, 12)`;
+- real-data training with two DataLoader workers completed;
+- strict checkpoint loading, full validation inference, and a `(3868, 13)`
+  submission completed from the smoke checkpoint.

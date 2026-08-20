@@ -200,7 +200,14 @@ def save_validation_predictions(metrics, targets, path):
     pd.concat([frame, actual], axis=1).to_csv(path, index=False)
 
 
-def main():
+def main(
+    model_class=SolarWindPhysicsTransformerV5,
+    architecture_name="SolarWindPhysicsTransformerV5",
+    version=5,
+    file_stem="solar_physics_v5",
+    feature_schema="cea_ch_quantiles_dark_area_ratio_delta_v1",
+    extra_model_kwargs=None,
+):
     wind_only = os.getenv("WIND_ONLY", "0").lower() in {"1", "true", "yes"}
     chain_balanced = os.getenv("CHAIN_BALANCED_SAMPLING", "1").lower() not in {
         "0",
@@ -254,7 +261,7 @@ def main():
         "validation_rows_used": int(len(selected_val_index)),
         "chain_balanced_sampling": chain_balanced,
     }
-    (OUTPUT_DIR / "solar_physics_v5_chain_manifest.json").write_text(
+    (OUTPUT_DIR / f"{file_stem}_chain_manifest.json").write_text(
         json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
     )
 
@@ -271,8 +278,9 @@ def main():
         "longitude_bins": longitude_bins,
         "use_images": not wind_only,
         **architecture_kwargs,
+        **(extra_model_kwargs or {}),
     }
-    model = SolarWindPhysicsTransformerV5(
+    model = model_class(
         baseline_slope=baseline_slope,
         baseline_intercept=baseline_intercept,
         **model_kwargs,
@@ -284,9 +292,9 @@ def main():
         optimizer, mode="min", factor=0.25, patience=3, min_lr=1e-6
     )
     scaler = torch.amp.GradScaler(AMP_DEVICE_TYPE, enabled=USE_AMP)
-    checkpoint_path = OUTPUT_DIR / "best_solar_physics_v5.pth"
-    history_path = OUTPUT_DIR / "solar_physics_v5_history.csv"
-    prediction_path = OUTPUT_DIR / "solar_physics_v5_validation_predictions.csv"
+    checkpoint_path = OUTPUT_DIR / f"best_{file_stem}.pth"
+    history_path = OUTPUT_DIR / f"{file_stem}_history.csv"
+    prediction_path = OUTPUT_DIR / f"{file_stem}_validation_predictions.csv"
     if checkpoint_path.exists():
         checkpoint_path.unlink()
 
@@ -302,7 +310,7 @@ def main():
     )
     parameter_count = sum(parameter.numel() for parameter in model.parameters())
     print(
-        f"architecture=solar_physics_v5 device={DEVICE} parameters={parameter_count:,} "
+        f"architecture={file_stem} device={DEVICE} parameters={parameter_count:,} "
         f"wind_only={wind_only} image_size={IMAGE_SIZE} "
         f"cea_grid={latitude_bins}x{longitude_bins} "
         f"train_chains={train_chains.count} val_chains={val_chains.count} "
@@ -378,8 +386,8 @@ def main():
             epochs_without_improvement = 0
             torch.save(
                 {
-                    "architecture": "SolarWindPhysicsTransformerV5",
-                    "version": 5,
+                    "architecture": architecture_name,
+                    "version": version,
                     "model_state_dict": model.state_dict(),
                     "model_kwargs": model_kwargs,
                     "epoch": epoch,
@@ -393,7 +401,7 @@ def main():
                         "solar_disk_mask": SOLAR_DISK_MASK,
                         "solar_disk_radius_fraction": SOLAR_DISK_RADIUS_FRACTION,
                         "solar_cea_radius_fraction": SOLAR_CEA_RADIUS_FRACTION,
-                        "feature_schema": "cea_ch_quantiles_dark_area_ratio_delta_v1",
+                        "feature_schema": feature_schema,
                         "cea_grid": [latitude_bins, longitude_bins],
                     },
                 },
@@ -414,7 +422,7 @@ def main():
     )
     plt.ylabel("RMSE (km/s)")
     plt.tight_layout()
-    plt.savefig(OUTPUT_DIR / "solar_physics_v5_learning_curve.png", dpi=140)
+    plt.savefig(OUTPUT_DIR / f"{file_stem}_learning_curve.png", dpi=140)
     print(f"saved: {checkpoint_path.resolve()} best_val_rmse={best_val_rmse:.3f}")
 
 

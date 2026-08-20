@@ -332,3 +332,25 @@ bash scripts_taeukjung/run_solar_physics_v5_local_mps.sh infer
 Both launchers default to 128 px, linear normalization, CEA radius `0.42`, a
 4 by 8 grid, learning rate `1e-4`, dropout 0.25, and chain-balanced sampling.
 The server uses batch size 64 and the local launcher uses batch size 4.
+
+## CNN restoration v6
+
+V6 is an isolated response to the V5 validation result. It preserves V5's
+chain-weighted linear baseline, chain-balanced sampler, causal wind encoder,
+Transformer, and RMSE-aligned loss, but replaces the fixed quantile/area image
+statistics with the complete V3 CEA CNN encoder. This restores multi-scale
+dilated kernels, relative-darkness channels, dual-polarity downsampling, and
+learned 4 by 8 spatial tokens.
+
+Competition server CUDA:
+
+```bash
+git switch taeukjung
+git pull --ff-only origin taeukjung
+bash scripts_taeukjung/run_solar_cnn_v6_server_cuda.sh train
+bash scripts_taeukjung/run_solar_cnn_v6_server_cuda.sh infer
+```
+
+V6 writes to `/home/jovyan/outputs/solar_cnn_v6_taeukjung`, so it cannot
+overwrite V3 or V5 checkpoints. Transformer findings and the proposed ablation
+order are recorded in `TRANSFORMER_REVIEW_taeukjung.md`.
