@@ -130,6 +130,18 @@ Local implementation checks:
 - checkpoint strict reload reproduced outputs exactly;
 - the optional mask-radius API preserved the original V2 mask and forward path.
 
+The first 128 px CUDA run reached its best validation RMSE of `67.737` at epoch
+7 and stopped at epoch 15. Training RMSE continued from 57.207 to 50.368 while
+validation degraded, confirming that the remaining limit is generalization, not
+optimization. This is 0.848 km/s worse than the earlier 128 px V1 best of
+66.889, so V3 does not replace V1 based on this run.
+
+The original CUDA log displayed `residual_rms=inf` from epoch 2 onward. This was
+only a diagnostic overflow: AMP returned the residual in FP16, and squaring a
+correction above roughly 256 km/s exceeds the FP16 range. Prediction errors were
+already cast to FP32, so the loss, reported RMSE, checkpoint, and inference were
+valid. V3 now casts the residual to FP32 before accumulating its RMS diagnostic.
+
 ## V4 Cartesian projection control
 
 The CEA mapping remains approximate because the PNG data do not contain FITS

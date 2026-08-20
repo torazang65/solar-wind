@@ -123,7 +123,7 @@ def run_epoch(loader, training):
                 scaler.step(optimizer)
                 scaler.update()
 
-        residual_km_s = residual.detach() * 1000.0
+        residual_km_s = residual.detach().float() * 1000.0
         squared_error_sum += float(torch.sum(error_km_s.detach().square()).cpu())
         residual_squared_sum += float(torch.sum(residual_km_s.square()).cpu())
         value_count += error_km_s.numel()
