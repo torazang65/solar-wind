@@ -18,7 +18,7 @@ if torch.cuda.is_available():
 # 2. Paths & Directories
 # ==========================================
 DATA_ROOT = Path("public_dataset/competition_dataset_6h")
-OUTPUT_DIR = Path("outputs/baseline_6h")
+OUTPUT_DIR = Path("outputs/transformer_v1_64px_residual_torazang65")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 CACHE_DIR = Path("outputs/cache")
 
@@ -55,6 +55,8 @@ MODEL_KWARGS = dict(
     # 0으로 두면 증강이 꺼진다. 주된 스윕 대상.
     time_mask_prob=0.15,
 )
+
+# ==========================================
 
 # ==========================================
 # 4. Device Setup
