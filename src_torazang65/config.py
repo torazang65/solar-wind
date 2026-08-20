@@ -24,7 +24,7 @@ if torch.cuda.is_available():
 DATA_ROOT = Path("public_dataset/competition_dataset_6h")
 # train.py가 시작 시 기존 best_model.pth를 지우므로, 런이 바뀔 때마다
 # 이름을 올려 이전 산출물을 보존한다.
-OUTPUT_DIR = Path(f"outputs/transformer_v6a_prop_torazang65_seed{SEED}")
+OUTPUT_DIR = Path(f"outputs/transformer_v6b_dynamics_torazang65_seed{SEED}")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 CACHE_DIR = Path("outputs/cache")
 
@@ -35,7 +35,11 @@ IMAGE_SIZE = 64
 CHANNELS = ("193", "211")
 RMSE_EPSILON = 1e-8
 BATCH_SIZE = 256
-EPOCHS = 100
+# v6b: early stopping 전에 cosine tail을 실제로 지나가도록 학습 길이를
+# patience와 정합한다. v6a는 100-epoch cosine을 정의해 놓고 epoch 26에
+# 멈춰 lr이 peak의 88%인 채로 끝났다.
+EPOCHS = 35
+EARLY_STOPPING_PATIENCE = 15
 NUM_WORKERS = 4
 
 # ---- 학습률 스케줄 ----
@@ -56,9 +60,12 @@ WARMUP_EPOCHS = 3
 # 크게 시작해(정렬부터 학습) DECAY_EPOCHS에 걸쳐 END로 선형 감쇠.
 # 전부 스윕하지 않는 고정 기본값 -- mechanism 지표(hindcast RMSE,
 # alpha/beta 거동)가 학습을 확인한 뒤에만 튜닝 대상으로 승격한다.
-HINDCAST_LAMBDA_START = 1.0
-HINDCAST_LAMBDA_END = 0.3
-HINDCAST_LAMBDA_DECAY_EPOCHS = 20
+# v6b: v6a에서 epoch 6의 forecast 최적점 뒤에도 hindcast 개선 압력이
+# 강하게 남아 두 목표가 경쟁했다. 정렬 학습에는 쓰되, 예측 최적화가
+# 주도권을 빠르게 되찾도록 초반 8 epoch에 감쇠를 끝낸다.
+HINDCAST_LAMBDA_START = 0.7
+HINDCAST_LAMBDA_END = 0.1
+HINDCAST_LAMBDA_DECAY_EPOCHS = 8
 # ballistic 잔차(tanh 출력 = delta/24h)의 L2 계수. tau를 D_eff/s
 # backbone 근방에 잡아둬 "값을 아무 시점에나 배치"하는 퇴화를 막는다.
 TRANSIT_RESIDUAL_L2 = 3e-3
@@ -73,7 +80,8 @@ SURGE_LAMBDA = 0.02
 SURGE_POS_WEIGHT = 2.3
 # 물리 스칼라 param group의 lr 배율 (train.py is_physical_param).
 # AdamW 스텝은 ~lr이라 base lr 총합(~0.1)로는 O(1) 스케일 스칼라
-# (reversion logit, gate bias, dist_eff raw)가 초기값에 얼어붙는다.
+# (reversion logit, dist_eff raw)가 초기값에 얼어붙는다. fusion gate는
+# v6a에서 alpha를 0.59 -> 0.93까지 포화시킨 원인 후보라 base lr로 둔다.
 PHYSICAL_LR_MULT = 100.0
 
 # ==========================================
