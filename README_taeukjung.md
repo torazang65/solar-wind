@@ -457,3 +457,23 @@ bash scripts_taeukjung/run_baseline_v2_2_server_cuda.sh diagnose
 The default server run uses 64 px, batch size 128, and an isolated output at
 `/home/jovyan/outputs/baseline_v2_2_taeukjung`. See
 `MODEL_BASELINE_V2_2_taeukjung.md` for dimensions, diagnostics, and commands.
+
+The completed V2.2 CUDA run reached its best validation RMSE of `69.653` at
+epoch 26. Retaining 320 image tokens improved V2.1, but it remained behind V6.
+
+## AR-Neural Baseline Transformer v2.3
+
+V2.3 fits one global ARIMA-family `(2, 0, 0)` forecast on the reconstructed
+training chains, then learns bounded wind-history and V2.2 image-Transformer
+residuals. The fixed AR path alone reaches `75.462` validation RMSE, compared
+with `76.094` for the previous affine last-wind baseline.
+
+```bash
+bash scripts_taeukjung/run_baseline_v2_3_server_cuda.sh train
+bash scripts_taeukjung/run_baseline_v2_3_server_cuda.sh infer
+bash scripts_taeukjung/run_baseline_v2_3_server_cuda.sh diagnose
+```
+
+The default is 64 px with 672,240 parameters. Outputs go to
+`/home/jovyan/outputs/baseline_v2_3_taeukjung`. See
+`MODEL_BASELINE_V2_3_taeukjung.md` for the architecture and leakage controls.

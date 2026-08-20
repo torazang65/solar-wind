@@ -137,11 +137,15 @@ def save_selected_token_attention(mean_tokens, output_path):
 
 
 @torch.no_grad()
-def main():
+def main(
+    model_class=SolarWindBaselineSpatialTransformerV22,
+    architecture_name=ARCHITECTURE_NAME,
+    file_stem=FILE_STEM,
+):
     model = load_best_model(
-        SolarWindBaselineSpatialTransformerV22,
-        ARCHITECTURE_NAME,
-        FILE_STEM,
+        model_class,
+        architecture_name,
+        file_stem,
         grid_label="spatial_grid",
     )
     chains = infer_temporal_chains(val_inputs, IMAGE_COLUMNS)
@@ -232,7 +236,7 @@ def main():
     mean_temporal = temporal_attention.mean(axis=0)
     mean_spatial = spatial_attention.mean(axis=0)
     mean_tokens = token_attention.mean(axis=0)
-    diagnostic_dir = OUTPUT_DIR / f"{FILE_STEM}_diagnostics"
+    diagnostic_dir = OUTPUT_DIR / f"{file_stem}_diagnostics"
     diagnostic_dir.mkdir(parents=True, exist_ok=True)
 
     save_preprocessing_figure(

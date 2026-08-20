@@ -340,3 +340,32 @@ training, EMA checkpoint reload, full validation inference, `(3868, 13)` test
 submission generation, and temporal/spatial attention diagnostics. The smoke
 run used only 128 training rows and is not a performance estimate. The next
 decision point is the complete 64 px CUDA validation RMSE.
+
+The complete 64 px CUDA run reached a best validation RMSE of `69.653` at epoch
+26. Training continued to improve while validation flattened and then
+degraded, so the larger token memory alone did not solve the generalization
+problem.
+
+## Baseline AR-Neural Transformer V2.3
+
+V2.3 changes only the wind baseline and its residual encoder. The V2.2 image
+CNN, 320-token factorized Transformer, regularization, and bounded image fusion
+remain controlled.
+
+The train rows reconstruct into 28 continuous chains and provide 10,419 unique
+one-step transitions. A globally fitted recursive AR(2) forecast obtains
+`75.462` validation RMSE and `73.570` chain-macro RMSE. It is stronger than the
+`76.094` affine-last-wind baseline. Direct 20-lag ridge regression was about
+`76.213`, while recursive differenced AR candidates were above `83`, so those
+alternatives were rejected.
+
+The neural wind path receives absolute level, level-relative history, and
+first differences. Its 12 corrections are zero-initialized and bounded by
+0.75 times the train AR residual scale. The complete prediction is fixed
+AR(2), plus the wind correction, plus the gated V2.2 image correction. No
+future row from the validation or test chains is used.
+
+A 256-row MPS smoke run completed training, strict checkpoint reload, full
+validation/test inference, submission generation, and diagnostics. Its full
+validation RMSE of `75.411` is a pipeline check rather than a model result. The
+next decision point is the complete default 64 px CUDA run.
