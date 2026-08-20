@@ -62,7 +62,9 @@ SPEED_GROUP_LABELS = ("slow", "mid", "fast")
 SURGE_THRESHOLD_KMS = 100.0
 BOOTSTRAP_ITERS = 10_000
 
-COMPONENT_LABELS = ("base", "base+prop", "base+corr", "full")
+COMPONENT_LABELS = (
+    "base", "base+shrink", "base+prop", "base+corr", "full"
+)
 
 
 # ================================================================
@@ -158,8 +160,17 @@ if __name__ == "__main__":
     print(f"val samples: {n_samples}")
 
     # ---- 성분 재조립 및 sanity check ----
+    # base+shrink: v_img를 학습된 climatology 상수로 바꾼 반사실.
+    # base+prop = (1-alpha)base + alpha*v_img 인데 alpha~0.6, v_img
+    # std ~22 km/s면 이 성분의 상당 부분은 "persistence를 상수 쪽으로
+    # 당기는 shrinkage"다 (beta가 하기로 했던 mean-reversion을 alpha가
+    # 대행). prop이 shrink를 이기는 폭(alignment_gain)만이 시간 정렬의
+    # 순수 기여다.
+    climatology_kms = float(model.climatology.detach()) * 1000.0
     predictions = {
         "base": a["base"],
+        "base+shrink":
+            a["base"] + a["alpha"] * (climatology_kms - a["base"]),
         "base+prop": a["base"] + a["alpha"] * (a["v_img"] - a["base"]),
         "base+corr": a["base"] + a["correction"],
     }
@@ -202,12 +213,18 @@ if __name__ == "__main__":
             }
             mse_base = se["base"][mask].mean(axis=1)
             gain_ci = {}
-            for name in ("base+prop", "base+corr", "full"):
+            for name in ("base+shrink", "base+prop", "base+corr",
+                         "full"):
                 mse_variant = se[name][mask].mean(axis=1)
                 ci, p = paired_gain_bootstrap(mse_base, mse_variant)
                 gain_ci[name] = (
                     rmse_by["base"] - rmse_by[name], ci, p
                 )
+            # alignment: shrink 반사실 대비 prop의 paired 우위.
+            align_ci, align_p = paired_gain_bootstrap(
+                se["base+shrink"][mask].mean(axis=1),
+                se["base+prop"][mask].mean(axis=1),
+            )
             prop_own = gain_ci["base+prop"][0]
             corr_own = gain_ci["base+corr"][0]
             total = gain_ci["full"][0]
@@ -216,10 +233,16 @@ if __name__ == "__main__":
                 "condition": condition_label,
                 "count": n,
                 **{f"rmse_{k}": v for k, v in rmse_by.items()},
+                "shrink_own_gain": gain_ci["base+shrink"][0],
                 "prop_own_gain": prop_own,
                 "prop_ci_low": gain_ci["base+prop"][1][0],
                 "prop_ci_high": gain_ci["base+prop"][1][1],
                 "prop_p_nonpositive": gain_ci["base+prop"][2],
+                "alignment_gain":
+                    rmse_by["base+shrink"] - rmse_by["base+prop"],
+                "align_ci_low": align_ci[0],
+                "align_ci_high": align_ci[1],
+                "align_p_nonpositive": align_p,
                 "corr_own_gain": corr_own,
                 "corr_ci_low": gain_ci["base+corr"][1][0],
                 "corr_ci_high": gain_ci["base+corr"][1][1],
@@ -237,14 +260,17 @@ if __name__ == "__main__":
     print(pivot.to_string(float_format=lambda v: f"{v:8.2f}"))
 
     print("\n=== own-gain vs base (km/s, paired bootstrap 95% CI) ===")
+    print("  (align = prop - shrink 반사실: 시간 정렬의 순수 기여)")
     for _, row in decomposition.iterrows():
         print(
             f"  {row.group:5s} {row.condition:6s} (n={int(row['count']):4d}): "
-            f"prop {row.prop_own_gain:+7.2f} "
-            f"[{row.prop_ci_low:+7.2f}, {row.prop_ci_high:+7.2f}]  "
-            f"corr {row.corr_own_gain:+7.2f} "
-            f"[{row.corr_ci_low:+7.2f}, {row.corr_ci_high:+7.2f}]  "
-            f"total {row.total_gain:+7.2f}  synergy {row.synergy:+6.2f}"
+            f"shrink {row.shrink_own_gain:+7.2f}  "
+            f"prop {row.prop_own_gain:+7.2f}  "
+            f"align {row.alignment_gain:+7.2f} "
+            f"[{row.align_ci_low:+7.2f}, {row.align_ci_high:+7.2f}] "
+            f"P(<=0)={row.align_p_nonpositive:.3f}  "
+            f"corr {row.corr_own_gain:+7.2f}  "
+            f"total {row.total_gain:+7.2f}"
         )
 
     # ---- horizon별 분해 (all 그룹) ----
@@ -254,14 +280,19 @@ if __name__ == "__main__":
         base_rmse = rmse(se["base"][:, j])
         for name in COMPONENT_LABELS:
             row[f"rmse_{name}"] = rmse(se[name][:, j])
+        row["shrink_own_gain"] = base_rmse - row["rmse_base+shrink"]
         row["prop_own_gain"] = base_rmse - row["rmse_base+prop"]
+        row["alignment_gain"] = (
+            row["rmse_base+shrink"] - row["rmse_base+prop"]
+        )
         row["corr_own_gain"] = base_rmse - row["rmse_base+corr"]
         horizon_rows.append(row)
     by_horizon = pd.DataFrame(horizon_rows)
     by_horizon.to_csv(DECOMP_DIR / "gain_by_horizon.csv", index=False)
     print("\n=== own-gain by horizon (all, km/s) ===")
     print(by_horizon[
-        ["horizon_hours", "prop_own_gain", "corr_own_gain"]
+        ["horizon_hours", "shrink_own_gain", "prop_own_gain",
+         "alignment_gain", "corr_own_gain"]
     ].to_string(index=False, float_format=lambda v: f"{v:7.2f}"))
 
     # ---- mechanism: corr(s_t, 도착 시각의 실측 wind) ----
@@ -310,6 +341,27 @@ if __name__ == "__main__":
             ),
             "token_weight_share": float(mask.mean()),
         })
+
+    # within-sample: 샘플별 gate-가중 평균을 빼서 레짐 수준(샘플 간
+    # 평균 차이) 효과를 제거한 상관. pooled corr은 "fast 레짐이라
+    # 전부 높게"만으로도 커질 수 있다 -- 이 값이 양수여야 "샘플 안에서
+    # 어느 토큰이 어느 시점 wind를 만드는지"를 읽는다는 증거다.
+    sample_weights = a["gate"] * in_window
+    weight_sums = sample_weights.sum(axis=1, keepdims=True)
+    has_weight = weight_sums[:, 0] > 0
+    x = a["src_speed"][has_weight]
+    y = observed_at_arrival[has_weight]
+    w = sample_weights[has_weight]
+    weight_sums = weight_sums[has_weight]
+    x_centered = x - (w * x).sum(axis=1, keepdims=True) / weight_sums
+    y_centered = y - (w * y).sum(axis=1, keepdims=True) / weight_sums
+    mech_rows.append({
+        "scope": "within_sample",
+        "corr_src_speed_vs_observed": weighted_corr(
+            x_centered.ravel(), y_centered.ravel(), w.ravel()
+        ),
+        "token_weight_share": float(has_weight.mean()),
+    })
     mechanism = pd.DataFrame(mech_rows)
     mechanism.to_csv(DECOMP_DIR / "mechanism.csv", index=False)
     print("\n=== mechanism: corr(s_t, wind@arrival), gate 가중 ===")
@@ -320,19 +372,36 @@ if __name__ == "__main__":
     prop_component = a["alpha"] * (a["v_img"] - a["base"])
     regime_rows = []
     for group_label, group_mask in groups.items():
-        regime_rows.append({
-            "group": group_label,
-            "alpha_mean": float(a["alpha"][group_mask].mean()),
-            "prop_component_std_kms":
-                float(prop_component[group_mask].std()),
-            "correction_std_kms":
-                float(a["correction"][group_mask].std()),
-            "v_img_std_kms": float(a["v_img"][group_mask].std()),
-        })
+        for condition_label, condition_mask in conditions.items():
+            mask = group_mask & condition_mask
+            if int(mask.sum()) < 30:
+                continue
+            regime_rows.append({
+                "group": group_label,
+                "condition": condition_label,
+                "count": int(mask.sum()),
+                "alpha_mean": float(a["alpha"][mask].mean()),
+                "prop_component_std_kms":
+                    float(prop_component[mask].std()),
+                "correction_std_kms":
+                    float(a["correction"][mask].std()),
+                "v_img_std_kms": float(a["v_img"][mask].std()),
+            })
     regime = pd.DataFrame(regime_rows)
     regime.to_csv(DECOMP_DIR / "regime_stats.csv", index=False)
     print("\n=== 레짐별 성분 통계 ===")
+    print("  (fusion gate가 일하면 alpha가 quiet에서 낮아야 한다)")
     print(regime.to_string(index=False,
                            float_format=lambda v: f"{v:8.2f}"))
+
+    # 로컬 추가 분석용 per-sample dump.
+    np.savez(
+        DECOMP_DIR / "components.npz",
+        target=a["target"], wind=a["wind"], speed=a["speed"],
+        last_wind=a["last_wind"], alpha=a["alpha"],
+        v_img=a["v_img"], base=a["base"], correction=a["correction"],
+        src_speed=a["src_speed"], arrival=a["arrival"],
+        gate=a["gate"], climatology_kms=climatology_kms,
+    )
 
     print(f"\nsaved to: {DECOMP_DIR.resolve()}")
