@@ -86,8 +86,19 @@ class SolarWindBaseline(nn.Module):
         dropout=0.1,
         pos_embedding_std=0.5,
         image_in_channels=2,
+        add_diff_channels=False,
     ):
         super().__init__()
+
+        # v4: running-difference 채널 (I_t - I_{t-1})을 forward에서 GPU로
+        # 계산해 원본 채널에 concat한다. coronal dimming(음수)/플레어
+        # 증광(양수) 같은 CME의 on-disk 신호가 사는 곳인데, 아래 conv는
+        # 시간 커널이 전부 1이라 이 정보를 스스로 만들 수 없다. dataset
+        # (CPU)이 아니라 여기서 만드는 이유: DataLoader의 in-flight 배치
+        # 메모리를 2배로 만들어 원격 pod에서 OOM이 났기 때문. GPU에서는
+        # 배치당 일시 텐서 하나 비용이다. True면 image_in_channels는
+        # 원본 채널 수의 2배여야 한다 (2 -> 4).
+        self.add_diff_channels = add_diff_channels
 
         # ============================================================
         # 1. Image feature extractor
@@ -330,52 +341,50 @@ class SolarWindBaseline(nn.Module):
         )
 
         # ============================================================
-        # 6.5 Dynamic temporal prior (image-conditioned)
+        # 6.5 Propagation readout (learned-ESWF layer) -- v5a
         # ============================================================
-        # The attention analysis showed the decoder's temporal prior
-        # is a fixed per-horizon template: cross-attention Q is the
-        # same for every sample (future_queries is a bare parameter,
-        # and with a 1-layer decoder nothing upstream of the first
-        # cross-attention depends on the input), so which image AGE a
-        # horizon looks at cannot adapt to the sample. The
-        # speed_ablation analysis showed the image pathway's entire
-        # value is detecting incoming high-speed streams -- an
-        # image-content question -- so the prior should be driven by
-        # a solar-state latent read from the images, not by wind.
+        # v2/v3의 dynamic temporal prior(cross-attention logit bias)를
+        # 대체한다. 실패 원인 진단: (1) prior가 출력 경로 밖의
+        # side-channel이라 gate zero-init에서 tau의 gradient가 gate에
+        # 비례해 0이었고(순환 사멸), (2) wind persistence 지름길이
+        # 있는 forecast loss만으로는 이미지 시간 정렬을 배울 유인이
+        # 없었다 (attention COM이 균일분포 평균(~57h)에 고정, slow-fast
+        # 그룹 차이 없음).
         #
-        # Parameterization: one scalar transit time per sample,
+        # 교체 구조: 토큰별 물리 스칼라 3개를 뽑아 결정론적 전파식으로
+        # 과거+미래 시간축의 wind 기여를 직접 조립한다.
         #
-        #   tau(z)  in [48, 120]h   (1 AU at 800..300 km/s)
-        #   mu_h    = clip(tau - h, 0, 114)   expected image age
-        #   B(h,t)  = -gate(z) * (age_t - mu_h)^2 / (2 sigma^2)
+        #   s_t   in [250, 900] km/s   source 속도 (/1000 스케일)
+        #   p_t   >= 0                 source 존재/지구 방향성
+        #   tau_t = D_eff/s_t + 24h*tanh(.)    통과시간
+        #   a_t   = tau_t - age_t      도착 시각 (음수 = 관측된 과거)
         #
-        # added to the cross-attention logits over the IMAGE half of
-        # memory (wind half gets 0). tau alone fixes all 12 mu_h with
-        # the physically forced slope of -1 hour per horizon hour, so
-        # the image head has to learn only "how fast is the incoming
-        # wind" -- a single interpretable scalar. gate(z) >= 0 lets
-        # the prior switch off on quiet samples (no incoming source
-        # detected); at gate=0 the model reduces exactly to the
-        # previous architecture, so the worst case is the status quo.
+        #   v_img(u) = (sum_t p_t K(u-a_t) s_t + lam*c)
+        #              / (sum_t p_t K(u-a_t) + lam)
         #
-        # Content attention (QK) stays untouched: the prior only
-        # moves WHERE to look, the matching of WHAT stays free.
-        #
-        # The state is computed from the image tokens AFTER the
-        # masking augmentations, so when modality dropout zeroes the
-        # image stream the state input is zero as well and the prior
-        # degrades to a learned constant -- the wind-only pathway
-        # regularization keeps working, and the image_projection
-        # zero-out ablation in speed_ablation.py covers this path
-        # automatically.
-        #
-        # Zero-init: transit head starts at tau=84h (mid-range) and
-        # the gate bias at -4 (softplus -> 0.018, prior effectively
-        # off), so training starts from the current architecture and
-        # has to earn the prior.
+        # 설계 근거:
+        # - ballistic backbone + 유계 잔차: 자유 tau는 "예측값을 곡선의
+        #   아무 시점에나 배치"하는 퇴화해를 허용한다. D/s 결합은 값이
+        #   시각을 결정하게 묶고(값-시각 잠금), tanh 잔차 ±24h가
+        #   SIR/connectivity 편차를 표현한다.
+        # - 정규화 가중평균: 출력이 s_t들의 convex hull 안에 갇혀
+        #   p로 진폭을 위조할 수 없다. 소스가 없으면 climatology c로
+        #   후퇴한다 (quiet에서 persistence에 지던 문제의 구조적 방어).
+        # - u는 hindcast 격자 [-72..0]h + forecast 격자 [+6..+72]h를
+        #   한 번에 쓴다. 같은 layer가 관측된 과거 wind를 재구성하는
+        #   보조 손실(train.py)로 이미지 전용 supervision을 받고,
+        #   그대로 미래로 연장된다. 커버리지는 속도 의존적(-|s| 시점은
+        #   tau <= 114-|s|인 소스만 도달)이라 깊은 과거는 fast stream만
+        #   커버하지만, 그게 정확히 이미지 gain이 0이던 레짐이다.
+        #   커버 불가 시점은 kernel 질량이 0이라 c로 수렴하고 전파
+        #   head에는 gradient가 없다. 커버리지를 학습량(p)으로
+        #   마스킹하면 p를 낮춰 loss를 회피할 유인이 생기므로 일부러
+        #   마스킹하지 않는다.
+        # - 초기화: 모든 head가 forward 경로에 있어 gradient가 항상
+        #   흐르므로(v2 gate와 달리 사멸 지점이 없다) 시작점만 현재
+        #   구조와 맞춘다. speed bias -0.96 -> s=0.43=climatology,
+        #   나머지 zero-init -> 순수 ballistic, 균일 p.
         # ============================================================
-
-        self.nhead = nhead
 
         self.register_buffer(
             "image_age_hours",
@@ -385,28 +394,74 @@ class SolarWindBaseline(nn.Module):
             "horizon_hours",
             torch.arange(1, 13, dtype=torch.float32) * 6.0,
         )
-
-        # mean over time = what sources are on disk;
-        # last5 - first5 = how they developed (growth / rotation
-        # toward the central meridian across the 5-day window).
-        self.solar_state_mlp = nn.Sequential(
-            nn.Linear(2 * d_model, 64),
-            nn.GELU(),
-        )
-        self.transit_head = nn.Linear(64, 1)
-        self.prior_gate_head = nn.Linear(64, 1)
-        self.log_prior_sigma = nn.Parameter(
-            torch.log(torch.tensor(24.0))
+        # hindcast 재구성 격자. -72h 이전은 어떤 (age<=114h, tau) 조합
+        # 으로도 사실상 도달 불가라 c만 훈련시키므로 제외.
+        self.register_buffer(
+            "hindcast_hours",
+            torch.arange(-12, 1, dtype=torch.float32) * 6.0,
         )
 
-        nn.init.zeros_(self.transit_head.weight)
-        nn.init.zeros_(self.transit_head.bias)
-        nn.init.zeros_(self.prior_gate_head.weight)
-        nn.init.constant_(self.prior_gate_head.bias, -4.0)
+        self.source_speed_head = nn.Linear(d_model, 1)
+        self.source_gate_head = nn.Linear(d_model, 1)
+        self.transit_residual_head = nn.Linear(d_model, 1)
 
-        # 분석용: 마지막 forward의 tau(z)/gate(z) (B,) detached.
-        self.last_transit_hours = None
-        self.last_prior_gate = None
+        # ballistic 상수: tau[h] = dist_eff / s[/1000 km/s 스케일].
+        # 1 AU = 1.496e8 km / 3.6e6 = 41.6. 학습 가능 -- Parker
+        # spiral/가속 구간의 평균 효과를 흡수한다.
+        # (참고: v2/v3 주석의 "[48,120]h = 800..300 km/s"는 오류였다.
+        #  실제 ballistic은 800->52h, 300->139h.)
+        self.dist_eff = nn.Parameter(torch.tensor(41.6))
+        # kernel 폭 sigma. 6h 격자에서 ±1스텝 0.88, ±4스텝 0.14.
+        # 고정 상수 -- 실험 표면(튜닝 노브)을 늘리지 않는다.
+        self.kernel_sigma_hours = 12.0
+        # quiet fallback 가중치 (softplus -> init 1.0).
+        self.fallback_weight_raw = nn.Parameter(torch.tensor(0.5413))
+        # climatology (/1000 스케일). hindcast fallback과 base_h의
+        # 복귀 목표를 겸한다. 주의: hindcast 경로의 fallback이
+        # last_wind면 image-only 재구성에 wind가 새므로 반드시
+        # per-sample 정보가 없는 상수여야 한다.
+        self.climatology = nn.Parameter(torch.tensor(0.43))
+
+        nn.init.zeros_(self.source_speed_head.weight)
+        nn.init.constant_(self.source_speed_head.bias, -0.96)
+        nn.init.zeros_(self.source_gate_head.weight)
+        nn.init.zeros_(self.source_gate_head.bias)
+        nn.init.zeros_(self.transit_residual_head.weight)
+        nn.init.zeros_(self.transit_residual_head.bias)
+
+        # ============================================================
+        # 6.6 Persistence anchor + fusion gate -- v5a
+        # ============================================================
+        #   base_h = last_wind + beta_h * (c - last_wind)
+        #
+        # "wind 중요도는 horizon이 늘수록 감소" prior를 horizon별
+        # 스칼라 12개로 명시한다. init sigmoid(-4)=0.018 -> 순수
+        # persistence (기존 residual과 동일 시작점). 학습된 beta_h가
+        # h에 단조 증가하는지 자체가 prior의 검증 지표다.
+        self.reversion_logit = nn.Parameter(torch.full((12,), -4.0))
+
+        # alpha_h: 전파 branch를 얼마나 믿을지 (forecast 전용 융합).
+        # source gate p_t(이미지 전용 -- hindcast 무결성 필수)와 달리
+        # 여기는 hindcast loss 밖이므로 wind 레짐 요약을 봐도 안전하고,
+        # 보는 게 맞다 (quiet 판단은 wind 상태와 결합된 정보).
+        # modality drop 시 이미지 요약이 0이어도 bias 경로로 alpha를
+        # 낮추는 것을 학습할 수 있다.
+        self.fusion_image_proj = nn.Linear(d_model, 16)
+        self.fusion_gate_head = nn.Linear(16 + 4, 12)
+
+        # zero-init + bias -2 -> alpha=0.12. 초기 v_img가 c 근방이라
+        # 시작 효과는 beta 0.12 상당의 mean-reversion뿐이다. alpha의
+        # gradient는 자기 값과 무관하게 (v_img - base)에 비례하고
+        # v_img는 hindcast로 독립 학습되므로 v2 gate식 순환 사멸이
+        # 없다.
+        nn.init.zeros_(self.fusion_gate_head.weight)
+        nn.init.constant_(self.fusion_gate_head.bias, -2.0)
+
+        # 분석용: 마지막 forward의 전파 변수들 (detached).
+        self.last_source_speed_kms = None
+        self.last_arrival_hours = None
+        self.last_source_gate = None
+        self.last_fusion_alpha = None
 
         # ============================================================
         # 7. Prediction head
@@ -432,27 +487,27 @@ class SolarWindBaseline(nn.Module):
         nn.init.zeros_(self.output_head[-1].weight)
         nn.init.zeros_(self.output_head[-1].bias)
 
-    def forward(self, images, wind):
+    def forward(self, images, wind, return_aux=False):
+        # return_aux=True면 (prediction, aux dict)를 반환한다. aux는
+        # train.py의 보조 손실용: hindcast 재구성(B,13), image_keep
+        # (B,) modality-drop 마스크, transit_residual(B,20). 기본값
+        # False라 inference.py 등 기존 call site는 그대로 동작한다.
 
         batch_size = wind.size(0)
 
-        # Last observed wind value, kept for the persistence residual
-        # at the very end of forward.
+        # wind 시퀀스 원형은 마지막 fusion gate 요약(6.6)에도 쓴다.
+        # last_wind는 persistence anchor의 기준값.
         #
         # (B,20) -> (B,1)
-        last_wind = wind[:, -1:]
+        wind_seq = wind
+        last_wind = wind_seq[:, -1:]
 
         # ============================================================
         # WIND TOKENS
         # ============================================================
 
-        # (B,20)
-        #    ↓
-        # (B,20,1)
-        wind = wind.unsqueeze(-1)
-
-        # (B,20,d_model)
-        wind_tokens = self.wind_projection(wind)
+        # (B,20) -> (B,20,1) -> (B,20,d_model)
+        wind_tokens = self.wind_projection(wind_seq.unsqueeze(-1))
 
         # ============================================================
         # IMAGE TOKENS
@@ -462,8 +517,18 @@ class SolarWindBaseline(nn.Module):
             # dataset:
             #
             # images:
-            # (B, T=20, C_in, H=64, W=64)
+            # (B, T=20, C=2, H=64, W=64)
             #
+            # v4: running-difference 채널을 여기(GPU)서 만들어 concat.
+            # 부호가 정보(음수=dimming, 양수=플레어)라 절대값을 취하지
+            # 않고, [-1,1] 스케일 그대로 둔다 (클리핑/증폭은 효과 확인
+            # 후의 튜닝 노브). 첫 프레임은 이전 프레임이 없어 0.
+            # 채널 순서: (193, 211, Δ193, Δ211) -> C_in=4.
+            if self.add_diff_channels:
+                diff = torch.zeros_like(images)
+                diff[:, 1:] = images[:, 1:] - images[:, :-1]
+                images = torch.cat([images, diff], dim=2)
+
             # Conv3D wants:
             #
             # (B, C_in, T=20, H=64, W=64)
@@ -515,6 +580,12 @@ class SolarWindBaseline(nn.Module):
             # all 20 image tokens at once. Unlike wind-only mode the
             # token slots stay in the sequence, carrying only the
             # time/modality embeddings. Training only.
+            #
+            # image_keep: drop된 샘플의 hindcast 재구성은 상수라
+            # train.py가 이 마스크로 해당 샘플을 손실에서 제외한다.
+            image_keep = torch.ones(
+                batch_size, device=image_tokens.device
+            )
             if self.training and self.modality_drop_prob > 0:
                 keep = (
                     torch.rand(
@@ -526,66 +597,80 @@ class SolarWindBaseline(nn.Module):
                     >= self.modality_drop_prob
                 )
                 image_tokens = image_tokens * keep
+                image_keep = keep.float().reshape(batch_size)
 
             # ========================================================
-            # SOLAR-STATE LATENT -> DYNAMIC TEMPORAL PRIOR
+            # PROPAGATION READOUT (section 6.5)
             # ========================================================
-            # Computed from the post-mask tokens so a dropped image
-            # stream produces a zero state (see section 6.5).
+            # post-mask 토큰에서 계산: modality drop된 샘플은 상수
+            # 재구성이 되므로 image_keep으로 손실에서 제외되고,
+            # time-mask된 개별 프레임은 head bias가 주는 "평균적
+            # 소스"로 나타난다 (확률적 증강 노이즈로 수용).
             #
-            # solar_state: (B, 64)
-            # transit:     (B, 1)   in [48, 120] hours
-            # gate:        (B, 1)   >= 0
-            # mu:          (B, 12)  expected image age per horizon
-            # prior_bias:  (B, 12, 40)  image half biased, wind half 0
+            # source_speed:     (B,20,1)  [0.25, 0.90] = 250..900 km/s
+            # source_gate:      (B,20,1)  >= 0
+            # transit_residual: (B,20)    tanh = delta/24h
+            # arrival:          (B,20)    도착 시각, 음수 = 과거
+            # v_image:          (B,25)    과거 13점 + 미래 12점
             # ========================================================
 
-            solar_state = self.solar_state_mlp(
-                torch.cat(
-                    [
-                        image_tokens.mean(dim=1),
-                        image_tokens[:, -5:].mean(dim=1)
-                        - image_tokens[:, :5].mean(dim=1),
-                    ],
-                    dim=-1,
-                )
+            source_speed = 0.25 + 0.65 * torch.sigmoid(
+                self.source_speed_head(image_tokens)
+            )
+            source_gate = F.softplus(
+                self.source_gate_head(image_tokens)
+            )
+            transit_residual = torch.tanh(
+                self.transit_residual_head(image_tokens)
+            ).squeeze(-1)
+
+            transit = (
+                self.dist_eff / source_speed.squeeze(-1)
+                + 24.0 * transit_residual
+            )
+            arrival = transit - self.image_age_hours
+
+            time_grid = torch.cat(
+                [self.hindcast_hours, self.horizon_hours]
+            )
+            kernel = torch.exp(
+                -((time_grid - arrival.unsqueeze(-1)) ** 2)
+                / (2.0 * self.kernel_sigma_hours**2)
+            )
+            weight = source_gate * kernel
+
+            fallback = F.softplus(self.fallback_weight_raw)
+            v_image = (
+                (weight * source_speed).sum(dim=1)
+                + fallback * self.climatology
+            ) / (weight.sum(dim=1) + fallback)
+
+            hindcast = v_image[:, : self.hindcast_hours.numel()]
+            v_image_future = v_image[:, self.hindcast_hours.numel():]
+
+            # fusion gate(6.6)용 이미지 요약. embedding이 더해지기
+            # 전의 content 토큰에서 계산한다.
+            image_summary = F.gelu(
+                self.fusion_image_proj(image_tokens.mean(dim=1))
             )
 
-            transit = 48.0 + 72.0 * torch.sigmoid(
-                self.transit_head(solar_state)
+            self.last_source_speed_kms = (
+                source_speed.detach().squeeze(-1) * 1000.0
             )
-            gate = F.softplus(self.prior_gate_head(solar_state))
-
-            mu = (transit - self.horizon_hours).clamp(
-                0.0, float(self.image_age_hours[0])
-            )
-
-            sigma = self.log_prior_sigma.exp()
-            prior_bias = (
-                -gate.unsqueeze(-1)
-                * (self.image_age_hours[None, None, :] - mu[:, :, None]) ** 2
-                / (2.0 * sigma**2)
-            )
-            prior_bias = torch.cat(
-                [prior_bias, torch.zeros_like(prior_bias)],
-                dim=-1,
-            )
-
-            # nn.MultiheadAttention adds a float attn_mask to the
-            # logits and accepts (B * nhead, L, S).
-            memory_mask = prior_bias.repeat_interleave(
-                self.nhead, dim=0
-            )
-
-            self.last_transit_hours = transit.detach().squeeze(-1)
-            self.last_prior_gate = gate.detach().squeeze(-1)
+            self.last_arrival_hours = arrival.detach()
+            self.last_source_gate = source_gate.detach().squeeze(-1)
         else:
             # wind-only diagnostic: skip the CNN and drop the image
             # stream entirely -- the encoder runs on wind tokens only.
             image_tokens = None
-            memory_mask = None
-            self.last_transit_hours = None
-            self.last_prior_gate = None
+            hindcast = None
+            image_keep = None
+            transit_residual = None
+            v_image_future = None
+            image_summary = None
+            self.last_source_speed_kms = None
+            self.last_arrival_hours = None
+            self.last_source_gate = None
 
         # ============================================================
         # MULTIMODAL SEQUENCE
@@ -667,15 +752,15 @@ class SolarWindBaseline(nn.Module):
         # NO autoregressive loop.
         # NO teacher forcing.
         #
-        # memory_mask carries the image-conditioned temporal prior
-        # (section 6.5) into every cross-attention as an additive
-        # logit bias; None in wind-only mode.
+        # v5a: cross-attention에는 더 이상 temporal prior bias가
+        # 없다. 시간 정렬은 section 6.5의 propagation branch가 출력
+        # 경로에서 직접 담당하고, 이 decoder는 그 위의 자유형
+        # correction만 만든다.
         # ============================================================
 
         decoded = self.transformer_decoder(
             tgt=queries,
             memory=memory,
-            memory_mask=memory_mask,
         )
 
         # decoded:
@@ -686,21 +771,53 @@ class SolarWindBaseline(nn.Module):
         # OUTPUT
         # ============================================================
 
-        prediction = self.output_head(decoded)
-
-        # (B,12,1)
-        #     ↓
-        # (B,12)
-        prediction = prediction.squeeze(-1)
+        # (B,12,1) -> (B,12)
+        correction = self.output_head(decoded).squeeze(-1)
 
         # ============================================================
-        # PERSISTENCE RESIDUAL
+        # OUTPUT ASSEMBLY (section 6.6)
         # ============================================================
-        # The head predicts the *change* from the last observed wind
-        # value rather than the absolute level. wind and target share
-        # the same /1000 scaling in dataset.py, so the units match.
+        #   v_hat(h) = base_h + alpha_h*(v_img(h) - base_h) + corr(h)
+        #   base_h   = last_wind + beta_h*(climatology - last_wind)
         #
-        # (B,12) + (B,1) -> (B,12)
+        # correction head는 zero-init이므로 시작점은 base(+alpha
+        # 0.12의 미미한 c-복귀 항) = 사실상 persistence. wind/target은
+        # dataset.py의 /1000 스케일을 공유한다.
         # ============================================================
 
-        return prediction + last_wind
+        beta = torch.sigmoid(self.reversion_logit)
+        base = last_wind + beta * (self.climatology - last_wind)
+
+        if image_tokens is not None:
+            # alpha_h (B,12): 이미지 요약 + wind 레짐 요약으로 전파
+            # branch의 신뢰도를 정한다 (forecast 전용 -- hindcast
+            # 경로와 무관하므로 wind를 봐도 새지 않는다).
+            wind_summary = torch.stack(
+                [
+                    wind_seq[:, -1],
+                    wind_seq.mean(dim=1),
+                    wind_seq.std(dim=1),
+                    wind_seq[:, -1] - wind_seq[:, 0],
+                ],
+                dim=-1,
+            )
+            alpha = torch.sigmoid(
+                self.fusion_gate_head(
+                    torch.cat([image_summary, wind_summary], dim=-1)
+                )
+            )
+            prediction = (
+                base + alpha * (v_image_future - base) + correction
+            )
+            self.last_fusion_alpha = alpha.detach()
+        else:
+            prediction = base + correction
+            self.last_fusion_alpha = None
+
+        if return_aux:
+            return prediction, {
+                "hindcast": hindcast,
+                "image_keep": image_keep,
+                "transit_residual": transit_residual,
+            }
+        return prediction
