@@ -129,3 +129,17 @@ Local implementation checks:
 - actual cached dataset batch forward and backward completed;
 - checkpoint strict reload reproduced outputs exactly;
 - the optional mask-radius API preserved the original V2 mask and forward path.
+
+## V4 Cartesian projection control
+
+The CEA mapping remains approximate because the PNG data do not contain FITS
+WCS metadata. V4 tests this assumption without changing the rest of V3. It
+keeps the original observed disk, masks pixels beyond radius `0.49`, and supplies
+normalized horizontal position, absolute vertical position, and projected
+`mu = sqrt(1 - r^2)` coordinate channels. Relative darkness is zero outside the
+disk and uses the same `sqrt(mu)` reliability as V3.
+
+The local run uses 64 px, batch size 128, linear normalization, 12 maximum
+epochs, seed 777, and the same 199,033-parameter temporal and forecast model.
+Its output is isolated under `dev/outputs/solar_cartesian_v4_local_64`. This is
+a geometry ablation, not a replacement for the 128 px CUDA V3 run.

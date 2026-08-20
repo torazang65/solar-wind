@@ -270,3 +270,20 @@ SOLAR_CEA_RADIUS_FRACTION=0.42 \
 SOLAR_V3_SPATIAL_HEIGHT=4 SOLAR_V3_SPATIAL_WIDTH=8 \
   bash scripts_taeukjung/run_solar_geometry_v3_server_cuda.sh train
 ```
+
+## Local Cartesian v4 ablation
+
+V4 is a local control experiment for the approximate CEA assumption. It keeps
+the V3 CNN, relative-darkness channel, 4 by 8 token grid, longitude-time axial
+attention, residual baseline, and RMSE-aligned loss. The only geometry change
+is that it retains the observed Cartesian solar disk instead of reprojecting it.
+
+The local launcher defaults to 64 px, batch size 64, 12 epochs, and a separate
+`dev/outputs/solar_cartesian_v4_local_64` output directory:
+
+```bash
+BATCH_SIZE=128 bash scripts_taeukjung/run_solar_cartesian_v4_local_mps.sh
+```
+
+This experiment should be compared against a 64 px CEA V3 run with the same
+seed and training settings before attributing a difference to the projection.

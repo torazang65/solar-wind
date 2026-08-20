@@ -128,7 +128,7 @@ def run_epoch(loader, training):
         residual_squared_sum += float(torch.sum(residual_km_s.square()).cpu())
         value_count += error_km_s.numel()
 
-        if batch_index % 20 == 0 or batch_index == len(loader):
+        if batch_index == 1 or batch_index % 20 == 0 or batch_index == len(loader):
             mode = "train" if training else "val"
             print(
                 f"{mode} batch={batch_index}/{len(loader)} "
