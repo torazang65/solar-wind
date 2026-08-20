@@ -107,6 +107,18 @@ class SolarWindDataset(Dataset):
     def __getitem__(self, item):
         row_index = int(self.indexes[item])
         images = np.asarray(self.image_array[self.image_indexes[row_index]], dtype=np.float32) / 255.0
+        # Running-difference 채널 (I_t - I_{t-1}): coronal dimming(음수)과
+        # 플레어 증광(양수) 같은 CME의 on-disk 신호가 사는 곳. model.py의
+        # conv는 시간 커널이 전부 1이라 프레임 간 픽셀 차분을 모델이
+        # 스스로 만들 수 없어 여기서 입력으로 공급한다. 부호가 정보이므로
+        # 절대값을 취하지 않고 [-1,1] 스케일 그대로 둔다 (전형적 |ΔI|는
+        # 작지만 클리핑/증폭은 효과 확인 후의 튜닝 노브로 남김). 첫
+        # 프레임은 이전 프레임이 없어 0. 캐시는 프레임 단위 uint8이라
+        # 그대로 재사용된다. 채널 순서: (193, 211, Δ193, Δ211).
+        diff = np.empty_like(images)
+        diff[0] = 0.0
+        diff[1:] = images[1:] - images[:-1]
+        images = np.concatenate([images, diff], axis=1)
         result = {
             "images": torch.from_numpy(images),
             "wind": torch.from_numpy(self.wind[row_index]),

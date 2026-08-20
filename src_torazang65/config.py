@@ -7,7 +7,11 @@ import torch
 # ==========================================
 # 1. Seed Setup
 # ==========================================
-SEED = 777
+# SEED=1234 python train.py 처럼 환경변수로 오버라이드. v2/v3 비교에서
+# 그룹별 delta ±5가 학습 궤적 노이즈로 판명됐으므로, 아키텍처 변경의
+# 판정은 seed 2개 이상 평균으로 한다. OUTPUT_DIR에 seed가 들어가
+# 멀티시드 런이 서로 덮어쓰지 않는다.
+SEED = int(os.environ.get("SEED", "777"))
 random.seed(SEED)
 np.random.seed(SEED)
 torch.manual_seed(SEED)
@@ -20,7 +24,7 @@ if torch.cuda.is_available():
 DATA_ROOT = Path("public_dataset/competition_dataset_6h")
 # train.py가 시작 시 기존 best_model.pth를 지우므로, 런이 바뀔 때마다
 # 이름을 올려 이전 산출물을 보존한다.
-OUTPUT_DIR = Path("outputs/transformer_v3_cosine_torazang65")
+OUTPUT_DIR = Path(f"outputs/transformer_v4_diffchan_torazang65_seed{SEED}")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 CACHE_DIR = Path("outputs/cache")
 
@@ -71,6 +75,12 @@ WARMUP_EPOCHS = 3
 #     샘플 불변 고정 템플릿이었다 (slow-fast COM gap -2h vs 이론 +34h).
 #     이미지에서 읽은 solar-state로 통과시간 tau를 예측해 attention
 #     logit에 가우시안 bias를 더한다. gate=0이면 v1으로 퇴화.
+# v4 (diffchan): 입력에 running-difference 채널 추가 (193, 211, Δ193,
+# Δ211). CNN의 시간 커널이 전부 1이라 CME의 on-disk 신호(coronal
+# dimming/플레어 증광 = 프레임 간 픽셀 차분)를 모델이 스스로 만들 수
+# 없어 dataset.py에서 공급한다. 판정: 같은 스케줄인 v3 대비
+# surge/event 지표(surge gain, event RMSE, worst-15) + seed 2개 평균.
+# 전체 RMSE는 노이즈(±1.5)에 묻히므로 판정 기준이 아니다.
 MODEL_KWARGS = dict(
     d_model=128,
     nhead=8,
@@ -85,6 +95,10 @@ MODEL_KWARGS = dict(
     # wind-only 경로가 항상 자립하도록 강제해서 이미지 경로 암기를
     # 억제한다. 0이면 꺼짐. time_mask_prob와 함께 스윕 대상.
     modality_drop_prob=0.25,
+    # 2 = 원본 EUV 채널만 (v3까지), 4 = + running-diff 채널 (v4).
+    # dataset.py가 항상 4채널을 만들므로 2로 되돌리려면 dataset의
+    # 차분 concat도 함께 빼야 한다.
+    image_in_channels=4,
 )
 
 # ==========================================
