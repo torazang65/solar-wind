@@ -74,7 +74,6 @@ class SolarWindBaseline(nn.Module):
     def __init__(
         self,
         d_model=256,
-        wind_dim=64,
         image_size=64,
         use_images=True,
         time_mask_prob=0.15,
@@ -151,15 +150,15 @@ class SolarWindBaseline(nn.Module):
         spatial = image_size // 16
 
         # Diagnostic switch. With use_images=False the CNN is skipped
-        # entirely and the image slice of every token is zeroed, so the
-        # model sees wind history only. Parameters are still built, so
+        # and the image tokens are dropped entirely, so the encoder
+        # sees only the 20 wind tokens. Parameters are still built, so
         # checkpoints stay compatible between the two modes.
         self.use_images = use_images
 
         # Temporal masking augmentation (SpecAugment style). During
-        # training each timestep's image slice is zeroed independently
+        # training each timestep's image token is zeroed independently
         # with this probability, so the model cannot lean on any single
-        # frame. Only the image slice is masked -- wind is the stronger
+        # frame. Only image tokens are masked -- wind is the stronger
         # signal and masking it costs more than it buys.
         #
         # This targets the real constraint: 9,607 samples drawn with a
@@ -167,52 +166,70 @@ class SolarWindBaseline(nn.Module):
         # effectively independent examples.
         #
         # No 1/(1-p) rescaling: token_norm renormalizes every token
-        # after the positional embedding is added, so a masked token is
-        # already on the same scale as an unmasked one.
+        # after the embeddings are added, so a masked token is already
+        # on the same scale as an unmasked one.
         self.time_mask_prob = time_mask_prob
 
-        # -> image slice of the fused token
+        # -> one image token per timestep
         #
-        # No LayerNorm here: normalization happens once on the fused
-        # token, after the positional embedding has been added.
+        # No LayerNorm here: normalization happens once per token,
+        # after the positional/modality embeddings have been added.
         self.image_projection = nn.Linear(
             128 * spatial * spatial,
-            d_model - wind_dim,
+            d_model,
         )
 
         # ============================================================
         # 2. Wind embedding
         # ============================================================
-        #   each wind value gets its own slice of the fused token,
-        #   so the scalar keeps a dedicated subspace instead of
-        #   competing with the image features for all d_model dims.
+        # Each wind value becomes its own full-width token. Wind is
+        # NOT fused into the image token of the same timestep: the
+        # wind measured at Earth at time t left the Sun 2-5 days
+        # earlier (300-800 km/s over 1 AU), so wind_t is causally
+        # paired with images 8-20 timesteps back -- and that lag
+        # itself depends on the wind speed. Separate token streams
+        # let attention discover the speed-dependent alignment
+        # instead of hard-wiring a wrong same-timestamp pairing.
         #
         # (B, 20)
         #       ↓
         # (B, 20, 1)
         #       ↓
-        # (B, 20, wind_dim)
+        # (B, 20, d_model)
         # ============================================================
 
-        self.wind_projection = nn.Linear(1, wind_dim)
+        self.wind_projection = nn.Linear(1, d_model)
 
         # ============================================================
-        # 3. Positional embedding + fused-token normalization
+        # 3. Positional + modality embeddings, token normalization
         # ============================================================
         #
-        # Image and wind are concatenated per timestep, so there is a
-        # single token type and no modality embedding is needed.
+        # Image and wind tokens taken at the same timestamp share one
+        # time embedding; a per-modality embedding tells them apart.
+        # (The projection biases could learn the modality offset on
+        # their own, but keeping it explicit costs 2*d_model params
+        # and spares the content weights the job.)
         #
         # std=0.5 is deliberate. The LayerNorm below forces the token
         # to per-dim std 1.0, so an embedding initialized at the usual
         # 0.02 would contribute ~2% of the token and be normalized
         # away -- the encoder would be nearly order-blind at init.
         # Pushing it to 1.0 instead starts diluting the token content,
-        # so 0.5 is the balance point.
+        # so 0.5 is the balance point. The modality embeddings reuse
+        # the same scale; pos + modality add in quadrature (~0.7 std),
+        # still below the content scale.
         # ============================================================
 
         self.pos_embedding = nn.Parameter(
             torch.randn(1, 20, d_model) * pos_embedding_std
+        )
+
+        self.image_modality = nn.Parameter(
+            torch.randn(1, 1, d_model) * pos_embedding_std
+        )
+
+        self.wind_modality = nn.Parameter(
+            torch.randn(1, 1, d_model) * pos_embedding_std
         )
 
         self.token_norm = nn.LayerNorm(d_model)
@@ -304,7 +321,7 @@ class SolarWindBaseline(nn.Module):
 
     def forward(self, images, wind):
 
-        batch_size = images.size(0)
+        batch_size = wind.size(0)
 
         # Last observed wind value, kept for the persistence residual
         # at the very end of forward.
@@ -321,7 +338,7 @@ class SolarWindBaseline(nn.Module):
         # (B,20,1)
         wind = wind.unsqueeze(-1)
 
-        # (B,20,wind_dim)
+        # (B,20,d_model)
         wind_tokens = self.wind_projection(wind)
 
         # ============================================================
@@ -362,13 +379,15 @@ class SolarWindBaseline(nn.Module):
 
             # (B,20,2048)
             #       ↓
-            # (B,20,d_model - wind_dim)
+            # (B,20,d_model)
             image_tokens = self.image_projection(
                 image_features
             )
 
             # (B,20,1) Bernoulli keep-mask, resampled every forward
-            # pass. Training only -- evaluation sees every frame.
+            # pass. Zeroes the whole image token; the time/modality
+            # embeddings added below still mark its slot.
+            # Training only -- evaluation sees every frame.
             if self.training and self.time_mask_prob > 0:
                 keep = (
                     torch.rand(
@@ -381,49 +400,57 @@ class SolarWindBaseline(nn.Module):
                 )
                 image_tokens = image_tokens * keep
         else:
-            # wind-only diagnostic: skip the CNN and blank the image
-            # slice. dtype follows wind_tokens so this stays correct
-            # under autocast.
-            image_tokens = wind_tokens.new_zeros(
-                batch_size,
-                wind_tokens.size(1),
-                self.image_projection.out_features,
-            )
+            # wind-only diagnostic: skip the CNN and drop the image
+            # stream entirely -- the encoder runs on wind tokens only.
+            image_tokens = None
 
         # ============================================================
         # MULTIMODAL SEQUENCE
         # ============================================================
-        #
-        # Image and wind observed at the same timestamp are fused into
-        # a single token, so the encoder never has to learn to pair
-        # them up:
+        # Two parallel token streams over the same 20 timestamps:
         #
         # [
-        #   [image_t0 | wind_t0],
-        #   [image_t1 | wind_t1],
-        #   ...
+        #   image_t0, ..., image_t19,
+        #   wind_t0,  ..., wind_t19,
         # ]
+        #
+        # Same-index image and wind share a time embedding but stay
+        # separate tokens: wind_t left the Sun days before image_t
+        # was taken, so fusing them would assert a causal alignment
+        # that does not exist (see section 2 in __init__). Attention
+        # is free to match wind to the earlier images instead.
         #
         # shape:
         #
-        # (B, 20, d_model)
+        # (B, 40, d_model) -- (B, 20, d_model) in wind-only mode
         # ============================================================
 
-        multimodal_tokens = torch.cat(
-            [image_tokens, wind_tokens],
-            dim=-1,
+        wind_tokens = (
+            wind_tokens + self.pos_embedding + self.wind_modality
         )
 
-        multimodal_tokens = self.token_norm(
-            multimodal_tokens + self.pos_embedding
-        )
+        if image_tokens is not None:
+            image_tokens = (
+                image_tokens
+                + self.pos_embedding
+                + self.image_modality
+            )
+            multimodal_tokens = torch.cat(
+                [image_tokens, wind_tokens],
+                dim=1,
+            )
+        else:
+            multimodal_tokens = wind_tokens
+
+        multimodal_tokens = self.token_norm(multimodal_tokens)
 
         # ============================================================
         # ENCODER
         # ============================================================
-        # Every timestep can attend to every other observed timestep.
+        # Every token can attend to every other token, across both
+        # modalities and all timesteps.
         # memory:
-        # (B,20,d_model)
+        # (B,40,d_model)
         # ============================================================
 
         memory = self.transformer_encoder(

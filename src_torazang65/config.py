@@ -41,9 +41,11 @@ NUM_WORKERS = 4
 # 유효표본이 수백 개 수준(9,607 샘플이지만 6시간 stride로 19배 중복)이라
 # 이전 설정(d_model=256, enc3/dec2, 3.74M)은 과적합했다. e21에 val 65.951로
 # 바닥을 치고 상승 전환.
+# wind_dim은 제거됨: 이미지/wind가 타임스텝별로 한 토큰에 concat되던
+# 구조에서 각자 별도 토큰 스트림(20+20=40 토큰)으로 분리되면서
+# 두 모달리티 모두 full d_model을 쓴다. 기존 체크포인트와는 호환 안 됨.
 MODEL_KWARGS = dict(
     d_model=128,
-    wind_dim=32,
     nhead=8,
     num_encoder_layers=2,
     num_decoder_layers=1,
