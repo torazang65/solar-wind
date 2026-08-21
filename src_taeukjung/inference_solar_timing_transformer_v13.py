@@ -38,6 +38,10 @@ from train_solar_timing_transformer_v13 import (
 )
 
 
+MODEL_CLASS = SolarWindTimingTransformerV13
+EXTRA_PREPROCESS = {}
+
+
 def current_preprocess():
     return {
         "image_size": IMAGE_SIZE,
@@ -68,6 +72,7 @@ def current_preprocess():
         "hindcast_decay_epochs": int(
             os.getenv("V13_HINDCAST_DECAY_EPOCHS", "8")
         ),
+        **EXTRA_PREPROCESS,
     }
 
 
@@ -90,7 +95,7 @@ def load_best_model():
                 f"key={key}, current={current}, checkpoint={expected}"
             )
 
-    model = SolarWindTimingTransformerV13(**checkpoint["model_kwargs"]).to(DEVICE)
+    model = MODEL_CLASS(**checkpoint["model_kwargs"]).to(DEVICE)
     model.load_state_dict(checkpoint["model_state_dict"], strict=True)
     model.eval()
     print(

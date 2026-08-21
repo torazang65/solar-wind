@@ -655,3 +655,11 @@ bash scripts_taeukjung/run_solar_timing_transformer_v13_ablation_server_cuda.sh 
 
 See `MODEL_SOLAR_TIMING_TRANSFORMER_V13_taeukjung.md` for the equations,
 mask guarantees, diagnostics, selected-run command, and interpretation rules.
+
+## Physics-Guided Deformable Timing V14
+
+V14 retains V13's speed-locked source values and AR guard but replaces dense
+source lookup with eight physically initialized samples per query and head.
+Seven samples may move within 12 hours and 1.5 longitude cells; one physical
+anchor remains fixed, and all samples are causally clipped. See
+`MODEL_SOLAR_DEFORMABLE_TIMING_V14_taeukjung.md` for the ablation command.

@@ -577,3 +577,17 @@ identical speed-locked Transformer: alignment KL `0.01` versus `0.0`. Default
 resolution remains 64 px because 128 px and denser grids did not improve V11.2
 reliably and materially increased runtime and overfit exposure. CUDA results
 are pending.
+
+## V14 physics-guided deformable timing attention
+
+The first V13 CUDA log showed a useful hindcast and alignment fit but almost no
+future image use: validation correction RMS stayed near `1 km/s`, correction
+gate near `0.024`, and validation RMSE remained effectively equal to AR(2).
+V14 tests whether local timing search can connect those learned image signals
+to future queries without introducing a free value path.
+
+Each query/head starts from the eight strongest V13 physical-arrival
+candidates. Seven candidates learn bounded acquisition-time and longitude
+offsets while one remains an exact physical anchor. Source speed is still
+shared by transit and output value, learned offsets remain causal, and a dense
+reconstruction keeps the existing backmapping ablation comparable.

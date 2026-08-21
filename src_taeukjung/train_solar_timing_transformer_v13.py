@@ -46,6 +46,22 @@ from train_solar_lstm_v12 import fit_ar_configuration
 FEATURE_SCHEMA = "disk_mask_signed_delta_lite_unet_speed_locked_timing_v13"
 CHECKPOINT_VERSION = "13"
 HOURS_AT_1_AU_PER_1000_KMS = 149_597_870.7 / 1000.0 / 3600.0
+MODEL_CLASS = SolarWindTimingTransformerV13
+SOURCE_MODELS = [
+    "competition CNN-LSTM sequence pipeline",
+    "Seokho V7 source-speed-to-arrival mapping",
+    "Taeuk V12.1 Lite U-Net spatial encoder",
+]
+MODEL_CHANGES = [
+    "image-only source-speed map; no neural wind shortcut",
+    "source speed and transit timing share the same scalar",
+    "physics-biased Transformer over 13 hindcast and 12 forecast queries",
+    "strict acquisition-time causal mask for every query",
+    "train-only AR(2) fallback with at most 0.5 image blend",
+    "weak target-derived backmapping alignment ablation",
+]
+MANIFEST_VERSION_KEY = "v13_changes"
+EXTRA_PREPROCESS = {}
 
 
 def boolean_environment(name, default=False):
@@ -390,7 +406,7 @@ def main():
     val_loader = make_chain_loader(val_dataset, training=False)
 
     model_kwargs = build_model_kwargs(ar_fit, ar_scale, wind_only=wind_only)
-    model = SolarWindTimingTransformerV13(**model_kwargs).to(DEVICE)
+    model = MODEL_CLASS(**model_kwargs).to(DEVICE)
     peak_lr = float(os.getenv("LEARNING_RATE", "3e-5"))
     weight_decay = float(os.getenv("V13_WEIGHT_DECAY", "0.03"))
     optimizer = torch.optim.AdamW(
@@ -417,19 +433,8 @@ def main():
         "validation": chain_manifest(val_chains),
         "train_rows_used": int(len(selected_train_index)),
         "validation_rows_used": int(len(selected_val_index)),
-        "source_models": [
-            "competition CNN-LSTM sequence pipeline",
-            "Seokho V7 source-speed-to-arrival mapping",
-            "Taeuk V12.1 Lite U-Net spatial encoder",
-        ],
-        "v13_changes": [
-            "image-only source-speed map; no neural wind shortcut",
-            "source speed and transit timing share the same scalar",
-            "physics-biased Transformer over 13 hindcast and 12 forecast queries",
-            "strict acquisition-time causal mask for every query",
-            "train-only AR(2) fallback with at most 0.5 image blend",
-            "weak target-derived backmapping alignment ablation",
-        ],
+        "source_models": SOURCE_MODELS,
+        MANIFEST_VERSION_KEY: MODEL_CHANGES,
     }
     (OUTPUT_DIR / f"{FILE_STEM}_chain_manifest.json").write_text(
         json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
@@ -590,6 +595,7 @@ def main():
                         "warmup_epochs": warmup_epochs,
                         "minimum_learning_rate": minimum_lr,
                         "optimizer_weight_decay": weight_decay,
+                        **EXTRA_PREPROCESS,
                     },
                 },
                 checkpoint_path,
