@@ -488,3 +488,23 @@ effective distance, `(B,20,2,4,25)` source kernels, and component diagnostics
 passed. The smoke run used only 128 training and 64 validation rows and is not
 a performance result. The full 64 px CUDA run should be compared directly with
 Seokho V7 using the same seed and 35-epoch schedule.
+
+## V11.2 resolution, grid, and consistency ablation
+
+V11.2 changes four testable factors around V11.1. The first experiment fixes
+the augmentation leak at the existing 64 px and `2 x 4` configuration. The
+second changes only image resolution to 128 px. The third changes only the
+128 px longitudinal grid from four to eight cells. The fourth adds a 0.05
+one-step overlap-consistency loss to the third configuration.
+
+The augmentation correction zeros physical source weight for masked times and
+zeros both source weight and fusion alpha for dropped image modalities. The
+dynamic grid derives longitude centers and offset bounds from cell width. The
+consistency loader verified 9,579 training pairs and 1,188 validation pairs;
+their image, wind, and target windows overlap exactly.
+
+Synthetic MPS forward/backward checks passed for 64 px `2 x 4`, 128 px
+`2 x 4`, and 128 px `2 x 8`. Shapes were respectively
+`(B,20,2,4,25)`, `(B,20,2,4,25)`, and `(B,20,2,8,25)`. Explicit source-mask,
+exact base-fallback, and paired-mask overlap checks also passed. Full CUDA
+results remain pending.
