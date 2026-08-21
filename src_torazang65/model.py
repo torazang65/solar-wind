@@ -651,10 +651,16 @@ class SolarWindBaseline(nn.Module):
         #  안으로 이동했다. base/gate는 wind_seq를 직접 읽는다.)
 
         if self.use_images:
+            # v8a: dataset이 uint8을 반환하면 여기(GPU)서 정규화한다.
+            # 호스트 RAM/전송을 1/4로 줄이는 OOM 방어 (dataset.py 참고).
+            # float 입력이 오면 no-op이라 기존 call site와 호환.
+            if images.dtype == torch.uint8:
+                images = images.float() / 255.0
+
             # dataset:
             #
             # images:
-            # (B, T=20, C=2, H=64, W=64)
+            # (B, T=20, C=2, H, W)  H=W=IMAGE_SIZE
             #
             # v4: running-difference 채널을 여기(GPU)서 만들어 concat.
             # 부호가 정보(음수=dimming, 양수=플레어)라 절대값을 취하지
