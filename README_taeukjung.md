@@ -637,3 +637,21 @@ bash scripts_taeukjung/run_solar_lstm_unet_v12_1_ablation_server_cuda.sh train
 
 See `MODEL_SOLAR_LSTM_UNET_V12_1_taeukjung.md` for selected-run commands,
 regularization settings, output paths, and inference.
+
+## Speed-Locked U-Net Timing Transformer V13
+
+V13 removes V12.1's free neural wind residual and free image-correction head.
+The Lite U-Net predicts a speed for every time/latitude/longitude source cell;
+that exact speed also determines its physical transit time. A Transformer uses
+causal, physics-biased cross-attention to select source cells for 13 hindcast
+and 12 forecast queries. Predictions remain anchored to train-only AR(2), with
+at most a 0.5 bounded move toward the image-derived source speed.
+
+One command compares weak target-derived backmapping against no backmapping:
+
+```bash
+bash scripts_taeukjung/run_solar_timing_transformer_v13_ablation_server_cuda.sh train
+```
+
+See `MODEL_SOLAR_TIMING_TRANSFORMER_V13_taeukjung.md` for the equations,
+mask guarantees, diagnostics, selected-run command, and interpretation rules.

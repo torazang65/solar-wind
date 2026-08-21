@@ -547,3 +547,33 @@ five-lag mixture. Both lower peak learning rate to `3e-5`, use batch 64 with
 zero loader workers, cap image correction at 1.25 residual scales, increase
 modality dropout to 0.25, use correction L2 weight 0.10, and stop after six
 non-improving epochs.
+
+Full V12.1 results confirmed that encoder replacement alone was insufficient.
+The multi-lag model was best at epoch 3 with train/validation RMSE
+`64.846/70.868 km/s`, chain-macro RMSE `69.363 km/s`, and correction RMS
+`32.833 km/s`. Fixed 96 hours was worse at epoch 5 with train/validation RMSE
+`55.454/72.045 km/s`, correction RMS `44.488 km/s`, and correction gate
+`0.809`. Both are retired because the validation gap and correction growth
+show that the flexible back end still bypasses transferable timing.
+
+## V13 speed-locked U-Net timing Transformer
+
+V13 makes Seokho's source-speed insight an architectural constraint. A partial
+U-Net produces `20 x 2 x 8` source cells. Each cell's predicted speed is used
+both as its forecast value and in `effective_distance / speed`; solar rotation,
+image age, and that transit produce its arrival time. A small Transformer can
+change attention among these candidates but cannot create an independent value
+head or free residual.
+
+Thirteen causal hindcast queries directly supervise image timing using observed
+wind values. The hindcast loss decays from 0.50 to 0.10 so it initializes
+mapping without dominating forecast selection. The final future prediction is
+a maximum-0.5, AR-residual-capped interpolation from train-only AR(2) toward
+the attention-weighted source speed. Time masking, image modality dropping,
+and soft disk masking remain active.
+
+Two runs isolate whether Seokho-style target backmapping helps the otherwise
+identical speed-locked Transformer: alignment KL `0.01` versus `0.0`. Default
+resolution remains 64 px because 128 px and denser grids did not improve V11.2
+reliably and materially increased runtime and overfit exposure. CUDA results
+are pending.
