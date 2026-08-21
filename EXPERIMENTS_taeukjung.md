@@ -591,3 +591,17 @@ candidates. Seven candidates learn bounded acquisition-time and longitude
 offsets while one remains an exact physical anchor. Source speed is still
 shared by transit and output value, learned offsets remain causal, and a dense
 reconstruction keeps the existing backmapping ablation comparable.
+
+## V15 direct peak event branches
+
+V15 addresses the V13 failure more directly than another attention prior. The
+future target itself supplies two unambiguous value labels: its maximum speed
+and, when the sequence has sufficient prominence, the 6-hour bin where that
+maximum occurs. A soft one-bin timing target and prominence weighting reduce
+argmax noise on flat sequences.
+
+The heads see V14 future query features plus AR and source-speed context. Their
+output can only add a bounded event-shaped correction; it cannot replace the
+12-step forecast. The default ablation changes peak-time loss weight from
+`0.05` to `0.10` while holding peak-value weight at `0.25` and disables the
+indirect backmapping loss to avoid competing timing labels.

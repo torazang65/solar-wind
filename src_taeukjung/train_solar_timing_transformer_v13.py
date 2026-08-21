@@ -62,6 +62,7 @@ MODEL_CHANGES = [
 ]
 MANIFEST_VERSION_KEY = "v13_changes"
 EXTRA_PREPROCESS = {}
+AUXILIARY_OBJECTIVE = None
 
 
 def boolean_environment(name, default=False):
@@ -236,6 +237,7 @@ def run_epoch(
     chain_squared_error = np.zeros(chain_count, dtype=np.float64)
     chain_value_count = np.zeros(chain_count, dtype=np.int64)
     diagnostics_sum = {}
+    auxiliary_sum = {}
     predictions = []
     sample_ids = []
     chain_ids_output = []
@@ -271,6 +273,12 @@ def run_epoch(
                 correction_l2 = components["image_correction"].square().mean()
                 gate_l1 = components["correction_gate"].mean()
                 smoothness = source_speed_smoothness(aux)
+                auxiliary_loss = prediction.new_zeros(())
+                auxiliary_metrics = {}
+                if AUXILIARY_OBJECTIVE is not None:
+                    auxiliary_loss, auxiliary_metrics = AUXILIARY_OBJECTIVE(
+                        model, prediction, components, aux, wind, target
+                    )
                 loss = (
                     forecast_loss
                     + hindcast_weight * hindcast_loss
@@ -278,6 +286,7 @@ def run_epoch(
                     + correction_l2_weight * correction_l2
                     + gate_l1_weight * gate_l1
                     + speed_smoothness_weight * smoothness
+                    + auxiliary_loss
                 )
 
             if training:
@@ -305,6 +314,11 @@ def run_epoch(
         counts["hindcast"] += int((keep.sum() * HINDCAST_STEPS).cpu())
         counts["alignment"] += len(images)
         counts["samples"] += len(images)
+        for name, value in auxiliary_metrics.items():
+            scalar = float(torch.as_tensor(value).detach().float().cpu())
+            auxiliary_sum[name] = (
+                auxiliary_sum.get(name, 0.0) + scalar * len(images)
+            )
 
         batch_chain_ids = batch["chain_id"].numpy()
         row_squared_error = forecast_error.square().sum(dim=1).cpu().numpy()
@@ -359,6 +373,10 @@ def run_epoch(
         "diagnostics": {
             name: value / counts["samples"]
             for name, value in diagnostics_sum.items()
+        },
+        "auxiliary_metrics": {
+            name: value / counts["samples"]
+            for name, value in auxiliary_sum.items()
         },
     }
     if collect_predictions:
@@ -530,10 +548,22 @@ def main():
                 f"val_{name}": value
                 for name, value in val_metrics["diagnostics"].items()
             },
+            **{
+                f"train_{name}": value
+                for name, value in train_metrics["auxiliary_metrics"].items()
+            },
+            **{
+                f"val_{name}": value
+                for name, value in val_metrics["auxiliary_metrics"].items()
+            },
         }
         history.append(row)
         pd.DataFrame(history).to_csv(history_path, index=False)
         diagnostics = val_metrics["diagnostics"]
+        auxiliary_text = "".join(
+            f" {name}={value:.3f}"
+            for name, value in val_metrics["auxiliary_metrics"].items()
+        )
         print(
             f"epoch={epoch:03d} train_rmse={train_metrics['rmse']:.3f} "
             f"val_rmse={val_metrics['rmse']:.3f} "
@@ -549,7 +579,8 @@ def main():
             f"distance={diagnostics['effective_distance_h']:.2f} "
             f"prior={diagnostics['physical_prior_strength']:.2f} "
             f"gate={diagnostics['correction_gate']:.3f} "
-            f"lr={learning_rate:.2e} seconds={elapsed:.1f}",
+            f"lr={learning_rate:.2e} seconds={elapsed:.1f}"
+            f"{auxiliary_text}",
             flush=True,
         )
 

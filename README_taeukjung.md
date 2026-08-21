@@ -663,3 +663,11 @@ source lookup with eight physically initialized samples per query and head.
 Seven samples may move within 12 hours and 1.5 longitude cells; one physical
 anchor remains fixed, and all samples are causally clipped. See
 `MODEL_SOLAR_DEFORMABLE_TIMING_V14_taeukjung.md` for the ablation command.
+
+## Direct Peak-Time and Peak-Value V15
+
+V15 adds explicit future-event supervision to V14. One branch predicts which
+of the 12 future bins contains the maximum, and another predicts that maximum
+speed. A small capped event curve connects both outputs to the forecast while
+preserving exact AR fallback under image masking. See
+`MODEL_SOLAR_PEAK_EVENT_V15_taeukjung.md` for the two-run command.
