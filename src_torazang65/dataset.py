@@ -110,7 +110,10 @@ class SolarWindDataset(Dataset):
         # forward가 GPU에서 계산한다 -- 여기(CPU)서 만들면 DataLoader의
         # in-flight 배치 메모리(worker x prefetch x pinned)가 2배가 되어
         # 원격 pod에서 OOM(Killed)이 났다.
-        images = np.asarray(self.image_array[self.image_indexes[row_index]], dtype=np.float32) / 255.0
+        # v8a: /255 정규화도 같은 이유로 model.forward(GPU)로 이동 --
+        # uint8 반환이 float32 대비 in-flight를 1/4로 줄인다 (128px에서
+        # 배치 256 float32는 ~671MB). 전송량도 1/4.
+        images = np.asarray(self.image_array[self.image_indexes[row_index]])
         result = {
             "images": torch.from_numpy(images),
             "wind": torch.from_numpy(self.wind[row_index]),

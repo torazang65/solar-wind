@@ -24,14 +24,30 @@ if torch.cuda.is_available():
 DATA_ROOT = Path("public_dataset/competition_dataset_6h")
 # train.py가 시작 시 기존 best_model.pth를 지우므로, 런이 바뀔 때마다
 # 이름을 올려 이전 산출물을 보존한다.
-OUTPUT_DIR = Path(f"outputs/transformer_v7_srcmap_torazang65_seed{SEED}")
+OUTPUT_DIR = Path(f"outputs/transformer_v8a_128px_torazang65_seed{SEED}")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 CACHE_DIR = Path("outputs/cache")
 
 # ==========================================
 # 3. Hyperparameters
 # ==========================================
-IMAGE_SIZE = 64
+# v8a (128px): 해상도만 올리는 단일 변수 실험 -- 감독(σ20/λ0.02)/구조/
+# 배치 전부 v7 그대로. 근거: v7b가 정렬 병목=정보임을 확정했고(σ/λ
+# 14x 압력에도 COM gap 무반응, 오히려 강제 blur), quiet 헤지의 병목도
+# 판별 정보(auroc 0.70 천장, oracle 반사실로 검증). 두 병목 모두
+# 64px에서 뭉개지는 dimming/CH 경계 신호를 지목한다.
+# 이미지는 dataset이 uint8로 반환하고 model.forward(GPU)가 /255 한다
+# -- 128px float32 반환은 DataLoader in-flight 4배(배치 256 기준
+# ~671MB)로 v4 때의 pod OOM을 재현한다. BATCH 축소 대안은 gradient
+# 노이즈가 바뀌는 confound라 기각. GPU VRAM이 모자라 배치를 줄이게
+# 되면 그 사실을 판정에 confound로 기록할 것.
+# 판정 (seed777 1런 -> 유망시 3-seed):
+#   (1) surge auroc 0.70 -> 상승 여부: quiet 헤지 완화 경로
+#   (2) launch COM slow-fast gap 이동 여부: 정보 가설 최종 판정 --
+#       128px에서도 무반응이면 y 역산의 SIR 노이즈가 도달 상한이라는
+#       뜻이므로 정렬은 정규화 장치로 확정, 이득처를 딴 데서 찾는다
+#   (3) val <= 66.2 (v7 seed777). 이후 v8b = readout 전용 2x8 격자.
+IMAGE_SIZE = 128
 CHANNELS = ("193", "211")
 RMSE_EPSILON = 1e-8
 BATCH_SIZE = 256
