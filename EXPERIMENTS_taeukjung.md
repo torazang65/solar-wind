@@ -467,3 +467,24 @@ only 128 training and 64 validation rows, so its RMSE is a pipeline check and
 not a performance estimate. The next decision point is the full 64 px CUDA
 run, followed by 128 px only if the source-map gain survives complete
 validation and chain/regime diagnostics.
+
+## V11.1 Seokho-centered source-map control
+
+The full V11 run reached `68.636` validation RMSE at epoch 11, improving its
+AR(2) anchor by `6.826 km/s` but trailing the earlier V6/V7 results. Its source
+propagation RMS continued from about 26 to 40 km/s while validation degraded,
+showing that the AR anchor, fixed lag, cap, and selective gate did not isolate
+the source-map discovery cleanly.
+
+V11.1 therefore restores Seokho V7's model and schedule as the experimental
+center. It removes AR(2), fixed 96-hour lag, AR-scaled bounds, fast/quiet
+suppression, source MLP, EMA, and component regularization. The output is again
+the V7 convex mixture of a learnable persistence base and the cell source-map
+forecast. Only the requested soft solar-disk mask remains as a model change.
+
+Local MPS verification passed at 64 and 128 px with 288,052 trainable
+parameters. Real-data training, raw checkpoint strict reload, learnable
+effective distance, `(B,20,2,4,25)` source kernels, and component diagnostics
+passed. The smoke run used only 128 training and 64 validation rows and is not
+a performance result. The full 64 px CUDA run should be compared directly with
+Seokho V7 using the same seed and 35-epoch schedule.

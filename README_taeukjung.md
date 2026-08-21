@@ -560,3 +560,21 @@ The default is 64 px, batch size 128, 35 epochs, EMA, and seed-isolated output
 under `/home/jovyan/outputs/solar_source_map_v11_taeukjung_seed777`. See
 `MODEL_SOLAR_SOURCE_MAP_V11_taeukjung.md` for equations, controls, and the
 controlled 128 px command.
+
+## Seokho-Centered Source Map V11.1
+
+V11.1 removes V11's AR(2), fixed 96-hour lag, residual cap, fast/quiet
+suppression, source MLP, and EMA. It restores Seokho V7's learnable effective
+distance, persistence/mean-reversion base, cell-shared linear heads, and
+unbounded convex source fusion. The only model-level Taeuk addition is the soft
+solar-disk mask.
+
+```bash
+bash scripts_taeukjung/run_solar_source_map_v11_1_server_cuda.sh train
+bash scripts_taeukjung/run_solar_source_map_v11_1_server_cuda.sh diagnose
+bash scripts_taeukjung/run_solar_source_map_v11_1_server_cuda.sh infer
+```
+
+The launcher matches the Seokho V7 defaults: 64 px, batch size 256, 35 epochs,
+peak learning rate `3e-5`, and physical-parameter multiplier 100. See
+`MODEL_SOLAR_SOURCE_MAP_V11_1_taeukjung.md` for the controlled-difference list.
