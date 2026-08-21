@@ -605,3 +605,16 @@ output can only add a bounded event-shaped correction; it cannot replace the
 12-step forecast. The default ablation changes peak-time loss weight from
 `0.05` to `0.10` while holding peak-value weight at `0.25` and disables the
 indirect backmapping loss to avoid competing timing labels.
+
+## V16 native longitude profile control
+
+V16 tests whether the spatial encoders were the main source of overfitting.
+No image resize, pooling, U-Net, or feature pyramid is used. Disk-masked
+latitude statistics preserve all 64 native longitude columns, including dark
+minima and bright maxima, before a stride-one longitude mixer and one-layer
+LSTM. A fixed 96-hour prior limits timing flexibility.
+
+The neural wind residual and indirect alignment loss are disabled. Three
+matched runs compare native images, time/longitude-scrambled images, and the
+exact AR(2) wind-only fallback. Native images are considered useful only when
+they beat both controls on micro and chain-macro validation RMSE.

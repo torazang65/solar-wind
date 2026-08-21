@@ -671,3 +671,11 @@ of the 12 future bins contains the maximum, and another predicts that maximum
 speed. A small capped event curve connects both outputs to the forecast while
 preserving exact AR fallback under image masking. See
 `MODEL_SOLAR_PEAK_EVENT_V15_taeukjung.md` for the two-run command.
+
+## Native Longitude Profile LSTM V16
+
+V16 removes learned spatial downsampling entirely. It retains all 64 original
+longitude columns, extracts disk-masked mean/min/max/std and signed temporal
+differences, and feeds a compact stride-one profile encoder and one-layer
+LSTM. Native, scrambled-image, and wind-only controls run from one
+server command documented in `MODEL_SOLAR_NATIVE_PROFILE_LSTM_V16_taeukjung.md`.
