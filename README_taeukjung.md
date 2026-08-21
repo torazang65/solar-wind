@@ -579,12 +579,13 @@ The launcher matches the Seokho V7 defaults: 64 px, batch size 256, 35 epochs,
 peak learning rate `3e-5`, and physical-parameter multiplier 100. See
 `MODEL_SOLAR_SOURCE_MAP_V11_1_taeukjung.md` for the controlled-difference list.
 
-## Source Map V11.2 Four-Way Ablation
+## Source Map V11.2 Three-Way Ablation
 
 V11.2 keeps the V11.1 model center while correcting time/modality masking,
 making the source grid dynamic, and optionally enforcing one-step chain
-forecast consistency. One launcher compares 64 px `2 x 4`, 128 px `2 x 4`,
-128 px `2 x 8`, and 128 px `2 x 8` with consistency.
+forecast consistency. One launcher compares 64 px `2 x 4`, 128 px `2 x 8`,
+and 128 px `2 x 8` with consistency. The retired 128 px `2 x 4` experiment is
+no longer run or included in the summary.
 
 ```bash
 bash scripts_taeukjung/run_solar_source_map_v11_2_ablation_server_cuda.sh train

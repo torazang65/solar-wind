@@ -82,10 +82,25 @@ run_experiment() {
     python "${program}"
 }
 
-run_experiment "exp1_64_2x4_maskfix" 64 4 256 0
-run_experiment "exp2_128_2x4_maskfix" 128 4 64 0
-run_experiment "exp3_128_2x8_maskfix" 128 8 64 0
-run_experiment "exp4_128_2x8_consistency" 128 8 32 0.05
+EXPERIMENTS="${V112_EXPERIMENTS:-exp1_64_2x4_maskfix exp3_128_2x8_maskfix exp4_128_2x8_consistency}"
+
+for experiment in ${EXPERIMENTS}; do
+  case "${experiment}" in
+    exp1_64_2x4_maskfix)
+      run_experiment "${experiment}" 64 4 256 0
+      ;;
+    exp3_128_2x8_maskfix)
+      run_experiment "${experiment}" 128 8 64 0
+      ;;
+    exp4_128_2x8_consistency)
+      run_experiment "${experiment}" 128 8 32 0.05
+      ;;
+    *)
+      echo "unknown V11.2 experiment: ${experiment}" >&2
+      exit 2
+      ;;
+  esac
+done
 
 if [[ "${ACTION}" == "train" ]]; then
   python src_taeukjung/summarize_solar_source_map_v11_2.py

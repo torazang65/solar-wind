@@ -48,12 +48,13 @@ Paired samples share augmentation decisions over their 19 common images. The
 term constrains only the overlapping forecast; the V7 forecast, hindcast,
 backmapping, transit, and surge objectives remain unchanged.
 
-## Four-Way CUDA Ablation
+## Three-Way CUDA Ablation
 
-The integrated launcher runs these experiments in order:
+The integrated launcher runs these experiments in order. Experiment 2 was
+retired, so the remaining identifiers intentionally keep their original
+numbers:
 
 1. 64 px, `2 x 4`, batch 256, corrected masks
-2. 128 px, `2 x 4`, batch 64, corrected masks
 3. 128 px, `2 x 8`, batch 64, corrected masks
 4. 128 px, `2 x 8`, batch 32, corrected masks and consistency weight 0.05
 
@@ -65,9 +66,20 @@ bash scripts_taeukjung/run_solar_source_map_v11_2_ablation_server_cuda.sh infer
 
 Outputs are isolated below
 `/home/jovyan/outputs/solar_source_map_v11_2_ablation_seed777`. Training writes
-`solar_source_map_v11_2_ablation_summary.csv` after all four runs. Inference
+`solar_source_map_v11_2_ablation_summary.csv` after all three runs. Inference
 strictly checks the checkpoint version, preprocessing, image size, mask, and
 source grid before loading weights.
+
+Set `V112_EXPERIMENTS` to a space-separated list to run only selected entries.
+For example, after experiment 1 has completed:
+
+```bash
+V112_EXPERIMENTS="exp3_128_2x8_maskfix exp4_128_2x8_consistency" \
+  bash scripts_taeukjung/run_solar_source_map_v11_2_ablation_server_cuda.sh train
+```
+
+Since experiment 2 was removed, experiments 1 and 3 change resolution and
+longitudinal grid density together and are not a pure resolution ablation.
 
 Common defaults are 35 epochs, learning rate `3e-5`, three warmup epochs,
 patience 15, seed 777, linear image normalization, and no chain-balanced

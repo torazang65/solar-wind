@@ -491,11 +491,12 @@ Seokho V7 using the same seed and 35-epoch schedule.
 
 ## V11.2 resolution, grid, and consistency ablation
 
-V11.2 changes four testable factors around V11.1. The first experiment fixes
-the augmentation leak at the existing 64 px and `2 x 4` configuration. The
-second changes only image resolution to 128 px. The third changes only the
-128 px longitudinal grid from four to eight cells. The fourth adds a 0.05
-one-step overlap-consistency loss to the third configuration.
+V11.2 retains three experiments around V11.1. The first fixes the augmentation
+leak at the existing 64 px and `2 x 4` configuration. The retired 128 px
+`2 x 4` experiment is excluded. The third jointly changes image resolution to
+128 px and the longitudinal grid to eight cells. The fourth adds a 0.05
+one-step overlap-consistency loss to the third configuration. Consequently,
+experiments 1 and 3 do not isolate resolution from grid density.
 
 The augmentation correction zeros physical source weight for masked times and
 zeros both source weight and fusion alpha for dropped image modalities. The

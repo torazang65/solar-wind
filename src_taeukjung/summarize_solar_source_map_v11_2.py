@@ -8,7 +8,6 @@ from model_solar_source_map_v11_2 import FILE_STEM
 
 EXPERIMENTS = (
     "exp1_64_2x4_maskfix",
-    "exp2_128_2x4_maskfix",
     "exp3_128_2x8_maskfix",
     "exp4_128_2x8_consistency",
 )
