@@ -618,3 +618,23 @@ The neural wind residual and indirect alignment loss are disabled. Three
 matched runs compare native images, time/longitude-scrambled images, and the
 exact AR(2) wind-only fallback. Native images are considered useful only when
 they beat both controls on micro and chain-macro validation RMSE.
+
+## V17 native fixed-speed transport and staged AR fusion
+
+V17 removes the remaining LSTM and free lag attention. It keeps 64 longitude
+columns and three latitude bands, then predicts only mixtures over fixed
+`300/400/500/650/800 km/s` experts. The same expert speed fixes both source
+value and transit time, with a broad arrival kernel to reflect uncertain
+mapping.
+
+The first stage uses the input sequence itself for causal supervision: earlier
+images reconstruct the last ten observed wind values. The transport encoder is
+then frozen while a small head learns how to combine raw transport with the
+train-only AR(2) forecast. A short low-learning-rate joint phase follows. A
+direct transport-minus-AR term replaces the learned image gate that collapsed
+in V13.
+
+Native images, deterministic time/longitude scrambling, and removal of the
+transport pretraining are matched controls. V17 should be retained only if the
+native run beats both controls and its observed-wind transport error is lower
+than the scrambled run. CUDA results are pending.

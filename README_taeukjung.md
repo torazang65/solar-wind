@@ -679,3 +679,13 @@ longitude columns, extracts disk-masked mean/min/max/std and signed temporal
 differences, and feeds a compact stride-one profile encoder and one-layer
 LSTM. Native, scrambled-image, and wind-only controls run from one
 server command documented in `MODEL_SOLAR_NATIVE_PROFILE_LSTM_V16_taeukjung.md`.
+
+## Native Transport Fusion V17
+
+V17 is a 13k-parameter from-scratch alternative. Native longitude profiles
+predict mixtures of five fixed speed experts whose values also determine their
+arrival delays. Training first reconstructs observed wind causally from
+images, then freezes transport while fitting AR(2) fusion, and finally performs
+a short joint fine-tune. Native, scrambled, and no-pretraining controls run
+from one command documented in
+`MODEL_SOLAR_TRANSPORT_FUSION_V17_taeukjung.md`.
