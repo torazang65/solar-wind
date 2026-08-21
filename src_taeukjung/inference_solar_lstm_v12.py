@@ -34,6 +34,11 @@ from model_solar_lstm_v12 import (
 from train_solar_lstm_v12 import FEATURE_SCHEMA, parse_lag_hours
 
 
+MODEL_CLASS = SolarWindLagLSTMV12
+CHECKPOINT_VERSION = "12"
+EXTRA_PREPROCESS = {}
+
+
 def current_preprocess():
     return {
         "image_size": IMAGE_SIZE,
@@ -53,6 +58,7 @@ def current_preprocess():
         "lag_alignment_weight": float(
             os.getenv("V12_LAG_ALIGNMENT_WEIGHT", "0.01")
         ),
+        **EXTRA_PREPROCESS,
     }
 
 
@@ -64,7 +70,7 @@ def load_best_model():
             f"not a {ARCHITECTURE_NAME} checkpoint: "
             f"{checkpoint.get('architecture')}"
         )
-    if checkpoint.get("version") != "12":
+    if checkpoint.get("version") != CHECKPOINT_VERSION:
         raise ValueError(f"unsupported checkpoint version: {checkpoint.get('version')}")
     expected_preprocess = checkpoint["preprocess"]
     for key, current in current_preprocess().items():
@@ -75,7 +81,7 @@ def load_best_model():
                 f"key={key}, current={current}, checkpoint={expected}"
             )
 
-    model = SolarWindLagLSTMV12(**checkpoint["model_kwargs"]).to(DEVICE)
+    model = MODEL_CLASS(**checkpoint["model_kwargs"]).to(DEVICE)
     model.load_state_dict(checkpoint["model_state_dict"], strict=True)
     model.eval()
     print(

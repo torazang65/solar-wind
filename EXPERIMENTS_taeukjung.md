@@ -528,3 +528,22 @@ Three otherwise identical runs compare five lag experts, one fixed 96 hour
 lag, and fully learned attention without a physical prior. All use 64 px and a
 `2 x 8` grid, so the result isolates the lag assumption rather than mixing it
 with resolution or model width. Full CUDA results remain pending.
+
+## V12.1 guarded Lite U-Net token encoder
+
+The first V12 multi-lag run reached validation RMSE `69.545` at epoch 3 while
+training RMSE had already fallen to `59.354` and validation image-correction
+RMS had grown to `42.438 km/s`. The process was later killed during epoch 4.
+That CNN experiment is retired because the early train-validation separation
+already indicates overfitting.
+
+V12.1 keeps the AR/wind/LSTM/lag back end but replaces the image CNN with a
+partial U-Net that fuses 4, 8, and 16 px features before the same `2 x 8`
+token pool. The channel schedule keeps total parameters at 943,356, close to
+V12's 931,116, so added spatial skips do not create a large capacity change.
+
+The server launcher tests only guarded U-Net variants: fixed 96 hours and the
+five-lag mixture. Both lower peak learning rate to `3e-5`, use batch 64 with
+zero loader workers, cap image correction at 1.25 residual scales, increase
+modality dropout to 0.25, use correction L2 weight 0.10, and stop after six
+non-improving epochs.

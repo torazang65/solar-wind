@@ -619,3 +619,21 @@ bash scripts_taeukjung/run_solar_lstm_v12_local_mps.sh smoke
 
 See `MODEL_SOLAR_LSTM_V12_taeukjung.md` for architecture details, selected-run
 commands, metrics, and interpretation rules.
+
+## Guarded Lite U-Net LSTM V12.1
+
+V12.1 retains V12's train-only AR(2) wind anchor, complete LSTM sequence,
+horizon attention, and lag prior while replacing only the image CNN with a
+partial U-Net token encoder. The decoder fuses 4, 8, and 16 px features and
+stops before full-resolution reconstruction, then pools to the same `2 x 8`
+grid. Its 943,356 parameters remain close to the V12 control.
+
+The retired V12 CNN exp1 is not rerun. One command compares guarded fixed-96
+and multi-lag U-Net configurations:
+
+```bash
+bash scripts_taeukjung/run_solar_lstm_unet_v12_1_ablation_server_cuda.sh train
+```
+
+See `MODEL_SOLAR_LSTM_UNET_V12_1_taeukjung.md` for selected-run commands,
+regularization settings, output paths, and inference.

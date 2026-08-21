@@ -311,17 +311,15 @@ class SolarWindLagLSTMV12(nn.Module):
             ).to(dtype=dtype)
         return time_keep, image_keep
 
-    def _encode_images(self, images):
+    def _prepare_image_channels(self, images):
         if self.apply_solar_disk_mask:
             images = images * self.solar_disk_mask.to(dtype=images.dtype)
         differences = torch.zeros_like(images)
         differences[:, 1:] = images[:, 1:] - images[:, :-1]
-        features = torch.cat(
-            [images, self.delta_gain * differences], dim=2
-        ).permute(0, 2, 1, 3, 4).contiguous()
-        features = self.stem(features)
-        for block in self.image_blocks:
-            features = block(features)
+        return torch.cat([images, self.delta_gain * differences], dim=2)
+
+    def _project_frame_features(self, features, batch_size):
+        """Convert a B,C,T,H,W feature map into LSTM frame tokens."""
         features = self.spatial_pool(features)
         cells = features.permute(0, 2, 3, 4, 1).contiguous()
         coordinates = self.cell_coordinates.to(dtype=cells.dtype)
@@ -339,8 +337,17 @@ class SolarWindLagLSTMV12(nn.Module):
         )
         frame_tokens = self.frame_norm(self.frame_projection(frame_input))
         return frame_tokens, spatial_attention.view(
-            images.shape[0], OBSERVED_STEPS, self.grid_rows, self.grid_columns
+            batch_size, OBSERVED_STEPS, self.grid_rows, self.grid_columns
         )
+
+    def _encode_images(self, images):
+        features = self._prepare_image_channels(images).permute(
+            0, 2, 1, 3, 4
+        ).contiguous()
+        features = self.stem(features)
+        for block in self.image_blocks:
+            features = block(features)
+        return self._project_frame_features(features, images.shape[0])
 
     def _lag_attention(self, lstm_output, wind_features, time_keep):
         batch_size = lstm_output.shape[0]

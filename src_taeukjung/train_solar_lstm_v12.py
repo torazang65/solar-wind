@@ -48,6 +48,18 @@ from train_solar_hybrid_v10 import limited_indexes, save_validation_predictions
 
 FEATURE_SCHEMA = "disk_mask_signed_delta_lon_preserving_cnn_lstm_soft_lag_v12"
 HOURS_AT_1_AU_PER_1000_KMS = 149_597_870.7 / 1000.0 / 3600.0
+MODEL_CLASS = SolarWindLagLSTMV12
+CHECKPOINT_VERSION = "12"
+MANIFEST_VERSION_KEY = "v12_changes"
+MODEL_CHANGES = [
+    "soft solar-disk mask and signed image differences",
+    "longitude-preserving 2x8 CNN grid at 64 px",
+    "full-sequence LSTM horizon attention",
+    "multi-expert soft lag prior",
+    "AR(2) plus full-history neural wind anchor",
+    "bounded gated image correction",
+]
+EXTRA_PREPROCESS = {}
 
 
 def parse_lag_hours(value=None):
@@ -393,7 +405,7 @@ def main():
     val_loader = make_chain_loader(val_dataset, training=False)
 
     model_kwargs = build_model_kwargs(ar_fit, ar_scale, wind_only=wind_only)
-    model = SolarWindLagLSTMV12(**model_kwargs).to(DEVICE)
+    model = MODEL_CLASS(**model_kwargs).to(DEVICE)
     peak_lr = float(os.getenv("LEARNING_RATE", "5e-5"))
     weight_decay = float(os.getenv("V12_WEIGHT_DECAY", "0.02"))
     optimizer = torch.optim.AdamW(
@@ -422,14 +434,7 @@ def main():
             "competition CNN-LSTM baseline",
             "Seokho source-map and speed-dependent lag findings",
         ],
-        "v12_changes": [
-            "soft solar-disk mask and signed image differences",
-            "longitude-preserving 2x8 CNN grid at 64 px",
-            "full-sequence LSTM horizon attention",
-            "multi-expert soft lag prior",
-            "AR(2) plus full-history neural wind anchor",
-            "bounded gated image correction",
-        ],
+        MANIFEST_VERSION_KEY: MODEL_CHANGES,
     }
     (OUTPUT_DIR / f"{FILE_STEM}_chain_manifest.json").write_text(
         json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
@@ -540,7 +545,7 @@ def main():
             torch.save(
                 {
                     "architecture": ARCHITECTURE_NAME,
-                    "version": "12",
+                    "version": CHECKPOINT_VERSION,
                     "model_state_dict": model.state_dict(),
                     "model_kwargs": model_kwargs,
                     "epoch": epoch,
@@ -567,6 +572,7 @@ def main():
                         "warmup_epochs": warmup_epochs,
                         "minimum_learning_rate": minimum_lr,
                         "optimizer_weight_decay": weight_decay,
+                        **EXTRA_PREPROCESS,
                     },
                 },
                 checkpoint_path,
