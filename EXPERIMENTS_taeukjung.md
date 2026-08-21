@@ -509,3 +509,22 @@ Synthetic MPS forward/backward checks passed for 64 px `2 x 4`, 128 px
 `(B,20,2,4,25)`, `(B,20,2,4,25)`, and `(B,20,2,8,25)`. Explicit source-mask,
 exact base-fallback, and paired-mask overlap checks also passed. Full CUDA
 results remain pending.
+
+## V12 LSTM soft-lag ablation
+
+V12 restores a learned temporal sequence model after V11 showed that hard
+source-speed-to-arrival routing remained weakly identified. It keeps the
+competition LSTM concept but replaces the raw image front end with the soft
+disk mask, signed differences, BatchNorm Inception CNN, and a 64 px `2 x 8`
+longitude-preserving grid. Unlike the competition baseline, all 20 LSTM
+outputs remain available to 12 horizon-specific queries.
+
+The prediction anchor is a train-only global AR(2) fit plus a bounded neural
+residual over the complete 20-step wind history. The LSTM image branch predicts
+only a bounded gated correction. This directly tests image value without
+requiring the image branch to relearn the wind baseline.
+
+Three otherwise identical runs compare five lag experts, one fixed 96 hour
+lag, and fully learned attention without a physical prior. All use 64 px and a
+`2 x 8` grid, so the result isolates the lag assumption rather than mixing it
+with resolution or model width. Full CUDA results remain pending.

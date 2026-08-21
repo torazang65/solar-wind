@@ -595,3 +595,27 @@ bash scripts_taeukjung/run_solar_source_map_v11_2_ablation_server_cuda.sh infer
 
 See `MODEL_SOLAR_SOURCE_MAP_V11_2_taeukjung.md` for the controlled variables,
 mask guarantees, chain-pair definition, and output paths.
+
+## Solar Lag LSTM V12
+
+V12 keeps the competition LSTM sequence model and replaces its image front end
+with a soft disk mask, signed temporal differences, and a longitude-preserving
+`2 x 8` spatial grid. Twelve horizon queries read the full LSTM sequence using
+an optional speed-dependent soft lag prior. Forecasts are anchored by a
+train-only global AR(2) fit plus a neural encoder over all 20 observed wind
+values; images contribute only a bounded gated correction.
+
+Run the controlled multi-lag, fixed-96-hour, and learned-only comparison:
+
+```bash
+bash scripts_taeukjung/run_solar_lstm_v12_ablation_server_cuda.sh train
+```
+
+Run the minimal local architecture check:
+
+```bash
+bash scripts_taeukjung/run_solar_lstm_v12_local_mps.sh smoke
+```
+
+See `MODEL_SOLAR_LSTM_V12_taeukjung.md` for architecture details, selected-run
+commands, metrics, and interpretation rules.
