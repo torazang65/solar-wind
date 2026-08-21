@@ -442,3 +442,28 @@ correction. The gate increases with the image-only surge probability and is
 suppressed for already-fast wind without surge evidence. The full CUDA result
 is pending; raw and gated component variants are emitted by the V10.1
 diagnostic for a controlled comparison.
+
+## V11 Seokho V7 source map with Taeuk controls
+
+Seokho V7 (`2df99c8`) replaces one source per frame with 160 cell sources and
+supervises their longitude-time assignment using label-derived backmapping.
+V11 preserves that mechanism while replacing persistence with the train-only
+AR(2) baseline (`75.462` full-validation RMSE), fixing the nominal transit to
+the previously tested 96-hour prior, masking the off-disk background, and
+bounding the complete source contribution by the AR residual scale.
+
+The final model deliberately excludes the free Transformer correction and
+neural wind residual. Prior branch decompositions showed that those paths
+lowered training error much faster than validation error, while propagation
+was the repeatable generalizing component. Fast/quiet suppression from V10.1,
+EMA, chain-aware metrics, time/modality masking, and strict checkpoint metadata
+remain.
+
+Local MPS verification completed with 171,537 trainable parameters. Forward,
+backward, `(B,20,2,4,25)` source kernels, two-epoch real-data training, EMA
+checkpoint reload, and component diagnostics passed. The reconstruction error
+for `full_v11 = ar_only + propagation` was `0.000061 km/s`. The smoke run used
+only 128 training and 64 validation rows, so its RMSE is a pipeline check and
+not a performance estimate. The next decision point is the full 64 px CUDA
+run, followed by 128 px only if the source-map gain survives complete
+validation and chain/regime diagnostics.

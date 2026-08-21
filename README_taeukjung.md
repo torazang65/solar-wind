@@ -540,3 +540,23 @@ bash scripts_taeukjung/run_solar_hybrid_v10_1_server_cuda.sh infer
 The default is 64 px and writes seed-isolated outputs under
 `/home/jovyan/outputs/solar_hybrid_v10_1_taeukjung_seed777`. See
 `MODEL_SOLAR_HYBRID_V10_1_taeukjung.md` for the component evidence and gate.
+
+## Cell Source Map V11
+
+V11 ports Seokho V7's `20 x 2 x 4` cell source map and backmapping alignment
+onto the Taeuk train-only AR(2) anchor. The masked Inception3D path predicts
+cell speed, evidence, longitude offset, and bounded transit residual; solar
+rotation and ballistic propagation determine when each cell can affect Earth.
+The only learned forecast term is a horizon-bounded source residual. There is
+no free Transformer correction or neural wind residual.
+
+```bash
+bash scripts_taeukjung/run_solar_source_map_v11_server_cuda.sh train
+bash scripts_taeukjung/run_solar_source_map_v11_server_cuda.sh diagnose
+bash scripts_taeukjung/run_solar_source_map_v11_server_cuda.sh infer
+```
+
+The default is 64 px, batch size 128, 35 epochs, EMA, and seed-isolated output
+under `/home/jovyan/outputs/solar_source_map_v11_taeukjung_seed777`. See
+`MODEL_SOLAR_SOURCE_MAP_V11_taeukjung.md` for equations, controls, and the
+controlled 128 px command.
